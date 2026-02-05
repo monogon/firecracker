@@ -151,7 +151,7 @@ fn test_dirty_bitmap_success() {
             .vm
             .as_kvm()
             .unwrap()
-            .get_dirty_bitmap()
+            .get_dirty_bitmap(4096)
             .unwrap();
         let num_dirty_pages: u32 = bitmap
             .values()
