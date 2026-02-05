@@ -145,10 +145,11 @@ use crate::devices::virtio::rng::Entropy;
 use crate::devices::virtio::vsock::{Vsock, VsockUnixBackend};
 use crate::logger::{METRICS, MetricsError, log_dev_preview_warning};
 use crate::mmds::data_store::Mmds;
-use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
+use crate::persist::{GuestRegionUffdMapping, MicrovmState, MicrovmStateError, VmInfo};
 use crate::rate_limiter::BucketUpdate;
 use crate::resources::VmmConfig;
 use crate::rpc_interface::VmmActionError;
+use crate::utils::usize_to_u64;
 use crate::vmm_config::HotplugDeviceConfig;
 use crate::vmm_config::balloon::BalloonDeviceConfig;
 use crate::vmm_config::boot_source::BootSourceConfig;
@@ -731,6 +732,34 @@ impl Vmm {
             .clone();
         self.device_manager
             .hot_unplug_device(kvm_vm, device_id, event_manager)
+    }
+
+    /// Get the list of mappings for guest memory
+    pub fn guest_memory_mappings(
+        &self,
+        page_size: usize,
+    ) -> Result<Vec<GuestRegionUffdMapping>, VmmActionError> {
+        let kvm_vm = self
+            .vm
+            .as_kvm()
+            .ok_or_else(|| VmmActionError::NotSupported("Operation requires KVM".to_string()))?;
+        let mut mappings = vec![];
+        let mut offset = 0;
+
+        for region in kvm_vm.guest_memory().iter() {
+            #[allow(deprecated)]
+            mappings.push(GuestRegionUffdMapping {
+                base_host_virt_addr: region.as_ptr() as u64,
+                size: region.size(),
+                offset,
+                page_size,
+                page_size_kib: page_size,
+            });
+
+            offset += usize_to_u64(region.size());
+        }
+
+        Ok(mappings)
     }
 }
 
