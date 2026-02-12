@@ -46,7 +46,11 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.149"
 slab = "0.4.12"
 thiserror = "2.0.18"
-userfaultfd = "0.9.0"
+userfaultfd = { git = "https://github.com/e2b-dev/userfaultfd-rs", rev = "9f4f7b42adbb9bea59016f4af248ed547cf160f0", features = [
+  "linux5_7",
+  "linux5_13",
+  "linux6_7"
+] }
 utils = { path = "../utils" }
 uuid = "1.23.1"
 vhost = { version = "0.15.0", features = ["vhost-user-frontend"] }

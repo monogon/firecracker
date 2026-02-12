@@ -590,7 +590,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "thiserror 2.0.18",
- "userfaultfd",
+ "userfaultfd 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "utils",
  "vmm",
  "vmm-sys-util",
@@ -1527,7 +1527,20 @@ dependencies = [
  "libc",
  "nix",
  "thiserror 1.0.69",
- "userfaultfd-sys",
+ "userfaultfd-sys 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "userfaultfd"
+version = "0.9.0"
+source = "git+https://github.com/e2b-dev/userfaultfd-rs?rev=9f4f7b42adbb9bea59016f4af248ed547cf160f0#9f4f7b42adbb9bea59016f4af248ed547cf160f0"
+dependencies = [
+ "bitflags 2.11.1",
+ "cfg-if",
+ "libc",
+ "nix",
+ "thiserror 1.0.69",
+ "userfaultfd-sys 0.6.0 (git+https://github.com/e2b-dev/userfaultfd-rs?rev=9f4f7b42adbb9bea59016f4af248ed547cf160f0)",
 ]
 
 [[package]]
@@ -1535,6 +1548,16 @@ name = "userfaultfd-sys"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc91d95a797a81604af22946d0e86656f27feb0b9665c60665cf3554df12d1a8"
+dependencies = [
+ "bindgen",
+ "cc",
+ "cfg-if",
+]
+
+[[package]]
+name = "userfaultfd-sys"
+version = "0.6.0"
+source = "git+https://github.com/e2b-dev/userfaultfd-rs?rev=9f4f7b42adbb9bea59016f4af248ed547cf160f0#9f4f7b42adbb9bea59016f4af248ed547cf160f0"
 dependencies = [
  "bindgen",
  "cc",
@@ -1651,7 +1674,7 @@ dependencies = [
  "serde_json",
  "slab",
  "thiserror 2.0.18",
- "userfaultfd",
+ "userfaultfd 0.9.0 (git+https://github.com/e2b-dev/userfaultfd-rs?rev=9f4f7b42adbb9bea59016f4af248ed547cf160f0)",
  "utils",
  "uuid",
  "vhost",
