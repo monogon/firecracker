@@ -60,6 +60,9 @@ pub struct DiskProperties {
     pub image_id: [u8; VIRTIO_BLK_ID_BYTES as usize],
     /// Set on first EOPNOTSUPP from fallocate; subsequent discards are no-ops. Not persisted.
     pub discard_unsupported: bool,
+    /// Set on first EOPNOTSUPP from fallocate during write-zeroes; subsequent
+    /// write-zeroes requests are no-ops. Not persisted.
+    pub write_zeroes_unsupported: bool,
 }
 
 impl DiskProperties {
@@ -108,6 +111,7 @@ impl DiskProperties {
             nsectors: disk_size >> SECTOR_SHIFT,
             image_id,
             discard_unsupported: false,
+            write_zeroes_unsupported: false,
         })
     }
 
@@ -130,6 +134,7 @@ impl DiskProperties {
         // the EOPNOTSUPP cache so the first request probes the new file
         // rather than carrying over the old one's verdict.
         self.discard_unsupported = false;
+        self.write_zeroes_unsupported = false;
 
         Ok(())
     }
