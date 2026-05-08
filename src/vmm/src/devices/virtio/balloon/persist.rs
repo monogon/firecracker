@@ -249,4 +249,22 @@ mod tests {
         assert_eq!(restored_balloon.stats_desc_index, balloon.stats_desc_index);
         assert_eq!(restored_balloon.latest_stats, balloon.latest_stats);
     }
+
+    #[test]
+    fn test_wait_on_ack_round_trips_snapshot() {
+        let guest_mem = default_mem();
+
+        let balloon = Balloon::new(0, false, 0, true, false).unwrap();
+        assert!(balloon.free_page_hinting_wait_ack());
+
+        let serialized_data = bitcode::serialize(&balloon.save()).unwrap();
+        let restored_state = bitcode::deserialize(&serialized_data).unwrap();
+        let restored_balloon =
+            Balloon::restore(BalloonConstructorArgs { mem: guest_mem }, &restored_state)
+        .unwrap();
+
+        assert!(restored_balloon.free_page_hinting());
+        assert!(restored_balloon.free_page_hinting_wait_ack());
+        assert_eq!(restored_balloon.avail_features, balloon.avail_features);
+    }
 }
