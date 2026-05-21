@@ -414,8 +414,14 @@ impl GuestRegionMmapExt {
         len: usize,
     ) -> Result<(), GuestMemoryError> {
         // The address and length can come straight from a guest descriptor (balloon), so reject
-        // unaligned input here rather than letting the mmap/madvise below fail on it.
-        let page_size = host_page_size() as u64;
+        // input that is not aligned to the page size backing this region (which may be a huge
+        // page) rather than discarding memory we are not meant to, or letting the mmap/madvise
+        // below fail on it.
+        let page_size = if self.flags() & HugePageConfig::Hugetlbfs2M.mmap_flags() != 0 {
+            HugePageConfig::Hugetlbfs2M.page_size()
+        } else {
+            host_page_size()
+        } as u64;
         if !caddr.raw_value().is_multiple_of(page_size) || !(len as u64).is_multiple_of(page_size) {
             return Err(GuestMemoryError::InvalidGuestAddress(
                 self.start_addr().unchecked_add(caddr.raw_value()),
