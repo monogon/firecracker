@@ -1097,6 +1097,7 @@ class Microvm:
         clock_realtime: bool = False,
         *,
         uffd_handler_name: str = None,
+        gdb_socket_path: str = None,
     ):
         """Restore a snapshot"""
 
@@ -1160,6 +1161,12 @@ class Microvm:
         if clock_realtime:
             optional_kwargs["clock_realtime"] = clock_realtime
 
+        # Restore-time GDB: start the gdb server on this socket. The guest is then
+        # held at the entry breakpoint, so the usual post-resume SSH check is skipped.
+        if gdb_socket_path is not None:
+            optional_kwargs["gdb_socket_path"] = gdb_socket_path
+            self.gdb_socket = gdb_socket_path
+
         self.api.snapshot_load.put(
             mem_backend=mem_backend,
             snapshot_path=str(jailed_vmstate),
@@ -1176,7 +1183,7 @@ class Microvm:
             self.memory_monitor.start()
 
         # This is not a "wait for boot", but rather a "VM still works after restoration"
-        if jailed_snapshot.net_ifaces and resume:
+        if jailed_snapshot.net_ifaces and resume and gdb_socket_path is None:
             self.wait_for_ssh_up()
         return jailed_snapshot
 
