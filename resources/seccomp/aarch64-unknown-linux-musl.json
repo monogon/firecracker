@@ -716,6 +716,10 @@
                         "comment": "Ensure PROT_EXEC is not set"
                     }
                 ]
+            },
+            {
+                "syscall": "pread64",
+                "comment": "Used when reading pagemap to get dirty memory"
             }
         ]
     },
