@@ -1398,6 +1398,7 @@ mod tests {
                     backend_type: MemBackendType::File,
                     backend_path: PathBuf::new(),
                     use_memfd: false,
+                    use_sync_wp: false,
                 },
                 track_dirty_pages: false,
                 resume_vm: false,

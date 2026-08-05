@@ -97,6 +97,11 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
                     "use_memfd is only valid when backend_type is Uffd",
                 )));
             }
+            if backend_cfg.use_sync_wp && backend_cfg.backend_type != MemBackendType::Uffd {
+                return Err(RequestError::SerdeJson(serde_json::Error::custom(
+                    "use_sync_wp is only valid when backend_type is Uffd",
+                )));
+            }
             backend_cfg
         }
         None => {
@@ -106,6 +111,7 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
                 backend_path: snapshot_config.mem_file_path.unwrap(),
                 backend_type: MemBackendType::File,
                 use_memfd: false,
+                use_sync_wp: false,
             }
         }
     };
@@ -196,6 +202,7 @@ mod tests {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::File,
                 use_memfd: false,
+                use_sync_wp: false,
             },
             track_dirty_pages: false,
             resume_vm: false,
@@ -231,6 +238,7 @@ mod tests {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::File,
                 use_memfd: false,
+                use_sync_wp: false,
             },
             track_dirty_pages: true,
             resume_vm: false,
@@ -266,6 +274,7 @@ mod tests {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::Uffd,
                 use_memfd: false,
+                use_sync_wp: false,
             },
             track_dirty_pages: false,
             resume_vm: true,
@@ -307,6 +316,7 @@ mod tests {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::Uffd,
                 use_memfd: false,
+                use_sync_wp: false,
             },
             track_dirty_pages: false,
             resume_vm: true,
@@ -342,6 +352,7 @@ mod tests {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::File,
                 use_memfd: false,
+                use_sync_wp: false,
             },
             track_dirty_pages: false,
             resume_vm: true,
@@ -448,6 +459,7 @@ mod tests {
                 backend_path: PathBuf::from("bar"),
                 backend_type: MemBackendType::Uffd,
                 use_memfd: true,
+                use_sync_wp: false,
             },
             track_dirty_pages: false,
             resume_vm: false,
