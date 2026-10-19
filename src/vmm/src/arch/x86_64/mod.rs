@@ -217,6 +217,11 @@ fn configure_vcpus_for_boot(
 
     // Phase 4: set MSRs and the remaining Linux boot state on each vCPU.
     for (vcpu, configured_cpuid) in vcpus.iter_mut().zip(&configured_cpuids) {
+        if let Some(tsc_khz) = cpu_template.x86_tsc_khz {
+            vcpu.kvm_vcpu
+                .set_tsc_khz(tsc_khz)
+                .map_err(KvmVcpuConfigureError::SetTsc)?;
+        }
         vcpu.kvm_vcpu
             .configure_msrs_for_boot(&msrs, configured_cpuid)?;
         vcpu.kvm_vcpu.configure_boot_state(guest_mem, entry_point)?;
@@ -586,6 +591,45 @@ mod tests {
     use crate::test_utils::{arch_mem, single_region_mem};
     use crate::utils::mib_to_bytes;
     use crate::vstate::resources::ResourceAllocator;
+    use crate::vstate::vm::tests::setup_vm_with_memory;
+
+    #[test]
+    fn test_configure_vcpus_for_boot_tsc_khz() {
+        let mut vm = setup_vm_with_memory(mib_to_bytes(16));
+        if !vm.fd().check_extension(kvm_ioctls::Cap::TscControl) {
+            println!("Skipping: KVM_CAP_TSC_CONTROL not supported");
+            return;
+        }
+        let mut vcpus = vm.create_vcpus(2).unwrap();
+        let host_tsc_khz = vcpus[0].kvm_vcpu.get_tsc_khz().unwrap();
+        let tsc_khz = host_tsc_khz / 2;
+        let machine_config = MachineConfig {
+            vcpu_count: 2,
+            ..Default::default()
+        };
+        let template = CustomCpuTemplate {
+            x86_tsc_khz: Some(tsc_khz),
+            ..Default::default()
+        };
+        let entry_point = EntryPoint {
+            entry_addr: GuestAddress(0),
+            protocol: BootProtocol::LinuxBoot,
+        };
+
+        configure_vcpus_for_boot(
+            vm.kvm(),
+            &mut vcpus,
+            &machine_config,
+            &template,
+            vm.guest_memory(),
+            entry_point,
+        )
+        .unwrap();
+
+        for vcpu in &vcpus {
+            assert_eq!(vcpu.kvm_vcpu.get_tsc_khz().unwrap(), tsc_khz);
+        }
+    }
 
     #[test]
     fn regions_lt_4gb() {

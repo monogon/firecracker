@@ -1238,6 +1238,16 @@ definitions:
         description: A collection of vCPU features to be modified (aarch64 only)
         items:
           $ref: "#/definitions/VcpuFeatures"
+      x86_tsc_khz:
+        type: integer
+        format: int64
+        minimum: 100000
+        maximum: 10000000
+        description:
+          Frequency (in kHz) at which the guest TSC runs (x86_64 only). When omitted, the guest
+          TSC runs at the host TSC frequency. Requires TSC scaling support from the host when
+          it differs from the host TSC frequency. Values outside 100 MHz to 10 GHz are
+          rejected, which also catches a value given in Hz or MHz by mistake.
 
   CpuidLeafModifier:
     type: object

@@ -185,6 +185,16 @@ This CPU template will do the following:
   - leave bits `0b11110000000000001100000000000000` intact.
 - in MSR `0x10`, it will clear all bits.
 
+On x86_64, a custom CPU template can also set the frequency at which the guest
+TSC runs, in kHz, with `x86_tsc_khz` (e.g. `"x86_tsc_khz": 2500000` for 2.5
+GHz). Values outside 100 MHz to 10 GHz are rejected. Running the guest TSC at a
+frequency different from the host one requires TSC scaling support from the
+host CPU. Firecracker also passes the frequency to the guest kernel with the
+`tsc_early_khz` boot parameter, unless the boot arguments already set it. When
+`x86_tsc_khz` is omitted, the guest TSC runs at the host TSC frequency.
+Snapshots store the guest TSC frequency, so a microVM restored from a snapshot
+keeps it.
+
 An example of configuring a custom CPU template on ARM:
 
 ```bash

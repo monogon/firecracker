@@ -110,6 +110,13 @@
                     }
                 }
             }
+        },
+        "x86_tsc_khz": {
+            "description": "Frequency (in kHz) at which the guest TSC runs. When omitted, the guest TSC runs at the host TSC frequency. Setting a frequency different from the host one requires TSC scaling support from the host. Firecracker also passes the frequency to the guest kernel with the `tsc_early_khz` boot parameter, unless the boot arguments already set it. Only for x86_64.",
+            "type": "integer",
+            "minimum": 100000,
+            "maximum": 10000000,
+            "examples": [2500000]
         }
     }
 }

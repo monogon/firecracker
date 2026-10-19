@@ -149,6 +149,8 @@ pub enum KvmVcpuConfigureError {
     SetupSpecialRegisters(#[from] SetupSpecialRegistersError),
     /// Failed to configure LAPICs: {0}
     SetLint(#[from] interrupts::InterruptError),
+    /// Failed to set the TSC frequency: {0}
+    SetTsc(#[from] SetTscError),
 }
 
 /// A wrapper around creating and using a kvm x86_64 vcpu.

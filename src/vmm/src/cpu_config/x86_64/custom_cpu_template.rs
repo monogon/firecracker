@@ -129,7 +129,16 @@ pub struct CustomCpuTemplate {
     /// Modifiers for model specific registers.
     #[serde(default)]
     pub msr_modifiers: Vec<RegisterModifier>,
+    /// Frequency (in kHz) at which the guest TSC runs. When not set, the guest TSC runs at the
+    /// host TSC frequency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x86_tsc_khz: Option<u32>,
 }
+
+/// Lowest accepted `x86_tsc_khz` (100 MHz).
+pub const MIN_TSC_KHZ: u32 = 100_000;
+/// Highest accepted `x86_tsc_khz` (10 GHz).
+pub const MAX_TSC_KHZ: u32 = 10_000_000;
 
 impl CustomCpuTemplate {
     /// Get an iterator of MSR indices that are modified by the CPU template.
@@ -139,6 +148,14 @@ impl CustomCpuTemplate {
 
     /// Validate the correctness of the template.
     pub fn validate(&self) -> Result<(), serde_json::Error> {
+        // The bounds catch values given in Hz or MHz by mistake.
+        if let Some(tsc_khz) = self.x86_tsc_khz
+            && !(MIN_TSC_KHZ..=MAX_TSC_KHZ).contains(&tsc_khz)
+        {
+            return Err(serde_json::Error::custom(format!(
+                "Invalid x86_tsc_khz {tsc_khz}: must be between {MIN_TSC_KHZ} and {MAX_TSC_KHZ}"
+            )));
+        }
         Ok(())
     }
 }
@@ -404,6 +421,42 @@ mod tests {
             cpu_template.get_cpu_template().unwrap(),
             Cow::Borrowed(&inner_cpu_template)
         );
+    }
+
+    #[test]
+    fn test_x86_tsc_khz() {
+        let template = CustomCpuTemplate::try_from(r#"{"x86_tsc_khz": 2500000}"#).unwrap();
+        assert_eq!(template.x86_tsc_khz, Some(2_500_000));
+        assert_eq!(
+            serde_json::to_value(&template).unwrap()["x86_tsc_khz"],
+            2_500_000
+        );
+
+        let template = CustomCpuTemplate::try_from("{}").unwrap();
+        assert_eq!(template.x86_tsc_khz, None);
+        assert!(
+            serde_json::to_value(&template)
+                .unwrap()
+                .get("x86_tsc_khz")
+                .is_none()
+        );
+
+        for tsc_khz in [MIN_TSC_KHZ, MAX_TSC_KHZ] {
+            CustomCpuTemplate::try_from(format!(r#"{{"x86_tsc_khz": {tsc_khz}}}"#).as_str())
+                .unwrap();
+        }
+        // Out of range, e.g. given in MHz or Hz.
+        for tsc_khz in [0, MIN_TSC_KHZ - 1, 2500, MAX_TSC_KHZ + 1, 2_500_000_000] {
+            let err =
+                CustomCpuTemplate::try_from(format!(r#"{{"x86_tsc_khz": {tsc_khz}}}"#).as_str())
+                    .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("Invalid x86_tsc_khz {tsc_khz}")),
+                "{err}"
+            );
+        }
+        CustomCpuTemplate::try_from(r#"{"x86_tsc_khz": -1}"#).unwrap_err();
     }
 
     #[test]

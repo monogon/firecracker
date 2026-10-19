@@ -229,6 +229,19 @@ pub fn build_microvm_for_boot(
         boot_cmdline.insert("pci", "off")?;
     }
 
+    // With a custom TSC frequency, pass it to the guest kernel's early TSC calibration as well, so
+    // it does not derive a different one, unless the user already set it.
+    #[cfg(target_arch = "x86_64")]
+    if let Some(tsc_khz) = cpu_template.x86_tsc_khz
+        && !boot_cmdline
+            .as_cstring()?
+            .to_string_lossy()
+            .split(' ')
+            .any(|param| param.starts_with("tsc_early_khz="))
+    {
+        boot_cmdline.insert("tsc_early_khz", &tsc_khz.to_string())?;
+    }
+
     // The boot timer device needs to be the first device attached in order
     // to maintain the same MMIO address referenced in the documentation
     // and tests.
