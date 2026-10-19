@@ -18,6 +18,9 @@ pub const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 /// Max size of virtio queues offered by firecracker's virtio devices.
 pub(super) const FIRECRACKER_MAX_QUEUE_SIZE: u16 = 256;
 
+/// How often `Queue::undo_pop` re-arms `avail_event` if the driver keeps publishing buffers.
+const UNDO_POP_REARM_RETRIES: usize = 16;
+
 // GuestMemoryMmap::read_obj_from_addr() will be used to fetch the descriptor,
 // which has an explicit constraint that the entire descriptor doesn't
 // cross the page boundary. Otherwise the descriptor may be split into
@@ -550,8 +553,31 @@ impl Queue {
 
     /// Undo the effects of the last `self.pop()` call.
     /// The caller can use this, if it was unable to consume the last popped descriptor chain.
+    ///
+    /// Callers undo a pop when they cannot make progress and stop processing the queue until they
+    /// are notified again. With notification suppression, `avail_event` can still be behind the
+    /// driver's `avail.idx` at this point, in which case the driver would not notify us about the
+    /// buffers it adds next and the queue would stall. So re-arm `avail_event` at the driver's
+    /// current `avail.idx`.
     pub fn undo_pop(&mut self) {
         self.next_avail -= Wrapping(1);
+
+        if !self.uses_notif_suppression {
+            return;
+        }
+
+        // The driver can publish more buffers between our read of `avail.idx` and the
+        // `avail_event` store becoming visible to it, and then skip the notification for them.
+        // Re-check after a full fence and re-arm if that happened. Bound the number of retries
+        // so a misbehaving driver cannot keep us here forever.
+        for _ in 0..UNDO_POP_REARM_RETRIES {
+            let avail_idx = self.avail_ring_idx_get();
+            self.used_ring_avail_event_set(avail_idx);
+            fence(Ordering::SeqCst);
+            if self.avail_ring_idx_get() == avail_idx {
+                break;
+            }
+        }
     }
 
     /// Write used element into used_ring ring.
@@ -1637,6 +1663,35 @@ mod tests {
             q.num_added = Wrapping(3);
             assert!(!q.prepare_kick());
         }
+    }
+
+    #[test]
+    fn test_undo_pop_rearms_notification() {
+        let m = &default_mem();
+        let vq = VirtQueue::new(GuestAddress(0), m, 16);
+        let mut q = vq.create_queue();
+        q.ready = true;
+
+        for i in 0..2 {
+            vq.dtable[i].set(0x1000_u64, 0x1000, 0, 0);
+            vq.avail.ring[i].set(u16::try_from(i).unwrap());
+        }
+        vq.avail.idx.set(2);
+
+        // Without notification suppression, undo_pop only rewinds the queue.
+        assert!(q.pop().unwrap().is_some());
+        q.undo_pop();
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.used_ring_avail_event_get(), 0);
+
+        // With notification suppression, it also arms avail_event at the driver's avail.idx,
+        // so the next buffer the driver publishes results in a notification.
+        q.enable_notif_suppression();
+        assert!(q.pop().unwrap().is_some());
+        assert!(q.pop().unwrap().is_some());
+        q.undo_pop();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.used_ring_avail_event_get(), 2);
     }
 
     #[test]
