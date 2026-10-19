@@ -18,6 +18,19 @@ pub fn verify(
     let msr_config = MsrModifierMap::from(cpu_config.msr_modifiers);
     verify_common(msr_template.0, msr_config.0)?;
 
+    if let Some(template_tsc_khz) = cpu_template.x86_tsc_khz {
+        match cpu_config.x86_tsc_khz {
+            None => return Err(VerifyError::KeyNotFound("x86_tsc_khz".to_string())),
+            Some(config_tsc_khz) if config_tsc_khz != template_tsc_khz => {
+                return Err(VerifyError::ValueMismatched(
+                    "x86_tsc_khz".to_string(),
+                    format!("expected: {template_tsc_khz}\nactual:   {config_tsc_khz}"),
+                ));
+            }
+            Some(_) => (),
+        }
+    }
+
     Ok(())
 }
 
@@ -229,6 +242,29 @@ mod tests {
              * CPU template     : 0b0000000000000000000000000000000000000000000000000000000010100000\n\
              * CPU configuration: 0b0000000000000000000000000000000000000000000000000000000001010000\n\
              * Diff             :                                                           ^^^^    ",
+        );
+    }
+
+    #[test]
+    fn test_verify_tsc_khz() {
+        let with_tsc = |tsc| CustomCpuTemplate {
+            x86_tsc_khz: tsc,
+            ..Default::default()
+        };
+
+        verify(with_tsc(None), with_tsc(Some(2_500_000))).unwrap();
+        verify(with_tsc(Some(2_500_000)), with_tsc(Some(2_500_000))).unwrap();
+        assert_eq!(
+            verify(with_tsc(Some(2_500_000)), with_tsc(None))
+                .unwrap_err()
+                .to_string(),
+            "x86_tsc_khz not found in CPU configuration."
+        );
+        assert_eq!(
+            verify(with_tsc(Some(2_500_000)), with_tsc(Some(3_000_000)))
+                .unwrap_err()
+                .to_string(),
+            "Value for x86_tsc_khz mismatched.\nexpected: 2500000\nactual:   3000000"
         );
     }
 }

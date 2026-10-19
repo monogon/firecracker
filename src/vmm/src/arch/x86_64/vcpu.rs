@@ -642,7 +642,12 @@ impl KvmVcpu {
         let kvm = kvm_ioctls::Kvm::new().unwrap();
         let msr_index_list = crate::arch::x86_64::msr::get_msrs_to_dump(&kvm)?;
         let msrs = self.get_msrs(msr_index_list.as_slice().iter().copied())?;
-        Ok(CpuConfiguration { cpuid, msrs })
+        let tsc_khz = self.get_tsc_khz().ok();
+        Ok(CpuConfiguration {
+            cpuid,
+            msrs,
+            tsc_khz,
+        })
     }
 
     /// Checks whether the TSC needs scaling when restoring a snapshot.

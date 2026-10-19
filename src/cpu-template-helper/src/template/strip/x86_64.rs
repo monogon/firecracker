@@ -9,6 +9,10 @@ use crate::utils::x86_64::{CpuidModifierMap, MsrModifierMap};
 
 #[allow(dead_code)]
 pub fn strip(templates: Vec<CustomCpuTemplate>) -> Result<Vec<CustomCpuTemplate>, StripError> {
+    // Like other common items, a TSC frequency all templates share is removed.
+    let tsc_khzs: Vec<_> = templates.iter().map(|t| t.x86_tsc_khz).collect();
+    let tsc_khz_common = tsc_khzs.windows(2).all(|w| w[0] == w[1]);
+
     // Convert `Vec<CustomCpuTemplate>` to two `Vec<HashMap<_>>` of modifiers.
     let (mut cpuid_modifiers_maps, mut msr_modifiers_maps): (Vec<_>, Vec<_>) = templates
         .into_iter()
@@ -28,7 +32,8 @@ pub fn strip(templates: Vec<CustomCpuTemplate>) -> Result<Vec<CustomCpuTemplate>
     let templates = cpuid_modifiers_maps
         .into_iter()
         .zip(msr_modifiers_maps)
-        .map(|(cpuid_modifiers_map, msr_modifiers_map)| {
+        .zip(tsc_khzs)
+        .map(|((cpuid_modifiers_map, msr_modifiers_map), tsc_khz)| {
             let cpuid_modifiers =
                 Vec::<CpuidLeafModifier>::from(CpuidModifierMap(cpuid_modifiers_map));
             let msr_modifiers = Vec::<RegisterModifier>::from(MsrModifierMap(msr_modifiers_map));
@@ -36,6 +41,7 @@ pub fn strip(templates: Vec<CustomCpuTemplate>) -> Result<Vec<CustomCpuTemplate>
             CustomCpuTemplate {
                 cpuid_modifiers,
                 msr_modifiers,
+                x86_tsc_khz: if tsc_khz_common { None } else { tsc_khz },
                 ..Default::default()
             }
         })
@@ -222,5 +228,25 @@ mod tests {
         let result = strip(input).unwrap();
         let expected = build_expected_msr_templates();
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_strip_tsc_khz() {
+        let with_tsc = |tsc| CustomCpuTemplate {
+            x86_tsc_khz: tsc,
+            ..Default::default()
+        };
+
+        // A TSC frequency shared by all templates is common, so it is removed.
+        let result = strip(vec![with_tsc(Some(2_500_000)), with_tsc(Some(2_500_000))]).unwrap();
+        assert_eq!(result, vec![with_tsc(None), with_tsc(None)]);
+
+        // Differing ones are kept.
+        let input = vec![
+            with_tsc(Some(2_500_000)),
+            with_tsc(Some(3_000_000)),
+            with_tsc(None),
+        ];
+        assert_eq!(strip(input.clone()).unwrap(), input);
     }
 }

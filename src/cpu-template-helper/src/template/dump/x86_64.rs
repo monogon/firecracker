@@ -20,6 +20,7 @@ pub fn config_to_template(cpu_config: &CpuConfiguration) -> CustomCpuTemplate {
     CustomCpuTemplate {
         cpuid_modifiers: cpuid_to_modifiers(&cpu_config.cpuid),
         msr_modifiers: msrs_to_modifier(&cpu_config.msrs),
+        x86_tsc_khz: cpu_config.tsc_khz,
         ..Default::default()
     }
 }
@@ -231,10 +232,12 @@ mod tests {
         let cpu_config = CpuConfiguration {
             cpuid: build_sample_cpuid(),
             msrs: build_sample_msrs(),
+            tsc_khz: Some(2_500_000),
         };
         let cpu_template = CustomCpuTemplate {
             cpuid_modifiers: build_expected_cpuid_modifiers(),
             msr_modifiers: build_expected_msr_modifiers(),
+            x86_tsc_khz: Some(2_500_000),
             ..Default::default()
         };
         assert_eq!(config_to_template(&cpu_config), cpu_template);

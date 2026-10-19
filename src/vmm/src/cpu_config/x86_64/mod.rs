@@ -38,6 +38,8 @@ pub struct CpuConfiguration {
     /// Key: MSR address
     /// Value: MSR value
     pub msrs: BTreeMap<u32, u64>,
+    /// TSC frequency in kHz, if known.
+    pub tsc_khz: Option<u32>,
 }
 
 /// Applies the CPUID modifiers from a CPU template.
