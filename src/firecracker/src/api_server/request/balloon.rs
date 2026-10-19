@@ -28,6 +28,25 @@ where
     }
 }
 
+fn parse_get_reporting<'a, T>(mut path_tokens: T) -> Result<ParsedRequest, RequestError>
+where
+    T: Iterator<Item = &'a str>,
+{
+    match path_tokens.next() {
+        Some("status") => Ok(ParsedRequest::new_sync(
+            VmmAction::GetFreePageReportingStatus,
+        )),
+        Some(stats_path) => Err(RequestError::Generic(
+            StatusCode::BadRequest,
+            format!("Unrecognized GET request path `/reporting/{stats_path}`."),
+        )),
+        None => Err(RequestError::Generic(
+            StatusCode::BadRequest,
+            "Unrecognized GET request path `/reporting/`.".to_string(),
+        )),
+    }
+}
+
 pub(crate) fn parse_get_balloon<'a, T>(mut path_tokens: T) -> Result<ParsedRequest, RequestError>
 where
     T: Iterator<Item = &'a str>,
@@ -35,6 +54,7 @@ where
     match path_tokens.next() {
         Some("statistics") => Ok(ParsedRequest::new_sync(VmmAction::GetBalloonStats)),
         Some("hinting") => parse_get_hinting(path_tokens),
+        Some("reporting") => parse_get_reporting(path_tokens),
         Some(stats_path) => Err(RequestError::Generic(
             StatusCode::BadRequest,
             format!("Unrecognized GET request path `{}`.", stats_path),
@@ -80,6 +100,34 @@ where
     }
 }
 
+fn parse_patch_reporting<'a, T>(
+    body: Option<&Body>,
+    mut path_tokens: T,
+) -> Result<ParsedRequest, RequestError>
+where
+    T: Iterator<Item = &'a str>,
+{
+    if body.is_some_and(|b| !b.is_empty()) {
+        return Err(RequestError::Generic(
+            StatusCode::BadRequest,
+            "PATCH requests on /balloon/reporting/* take no body.".to_string(),
+        ));
+    }
+
+    match path_tokens.next() {
+        Some("pause") => Ok(ParsedRequest::new_sync(VmmAction::PauseFreePageReporting)),
+        Some("resume") => Ok(ParsedRequest::new_sync(VmmAction::ResumeFreePageReporting)),
+        Some(stats_path) => Err(RequestError::Generic(
+            StatusCode::BadRequest,
+            format!("Unrecognized PATCH request path `/reporting/{stats_path}`."),
+        )),
+        None => Err(RequestError::Generic(
+            StatusCode::BadRequest,
+            "Unrecognized PATCH request path `/reporting/`.".to_string(),
+        )),
+    }
+}
+
 pub(crate) fn parse_patch_balloon<'a, T>(
     body: Option<&Body>,
     mut path_tokens: T,
@@ -94,6 +142,7 @@ where
             )))
         }
         (Some("hinting"), body) => parse_patch_hinting(body, path_tokens),
+        (Some("reporting"), body) => parse_patch_reporting(body, path_tokens),
         (_, Some(body)) => Ok(ParsedRequest::new_sync(VmmAction::UpdateBalloon(
             serde_json::from_slice::<BalloonUpdateConfig>(body.raw())?,
         ))),
@@ -115,6 +164,14 @@ mod tests {
         parse_get_balloon(["statistics"].into_iter()).unwrap();
 
         parse_get_balloon(["hinting", "status"].into_iter()).unwrap();
+        assert_eq!(
+            vmm_action_from_request(
+                parse_get_balloon(["reporting", "status"].into_iter()).unwrap()
+            ),
+            VmmAction::GetFreePageReportingStatus
+        );
+        parse_get_balloon(["reporting", "unrelated"].into_iter()).unwrap_err();
+        parse_get_balloon(["reporting"].into_iter()).unwrap_err();
         parse_get_balloon(["hinting", "unrelated"].into_iter()).unwrap_err();
         parse_get_balloon(["hinting"].into_iter()).unwrap_err();
     }
@@ -234,6 +291,29 @@ mod tests {
         // PATCH stop hinting invalid path
         parse_patch_balloon(Some(&Body::new("")), ["hinting", "other path"].into_iter())
             .unwrap_err();
+
+        // PATCH pause/resume reporting, with no or empty body
+        for body in [None, Some(Body::new(""))] {
+            assert_eq!(
+                vmm_action_from_request(
+                    parse_patch_balloon(body.as_ref(), ["reporting", "pause"].into_iter()).unwrap()
+                ),
+                VmmAction::PauseFreePageReporting
+            );
+            assert_eq!(
+                vmm_action_from_request(
+                    parse_patch_balloon(body.as_ref(), ["reporting", "resume"].into_iter())
+                        .unwrap()
+                ),
+                VmmAction::ResumeFreePageReporting
+            );
+        }
+
+        // PATCH reporting with a body or an invalid path
+        parse_patch_balloon(Some(&Body::new("{}")), ["reporting", "pause"].into_iter())
+            .unwrap_err();
+        parse_patch_balloon(None, ["reporting", "other path"].into_iter()).unwrap_err();
+        parse_patch_balloon(None, ["reporting"].into_iter()).unwrap_err();
 
         // PATCH no body non hinting
         parse_patch_balloon(None, ["hinting"].into_iter()).unwrap_err();

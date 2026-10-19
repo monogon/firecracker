@@ -79,6 +79,12 @@ pub enum BalloonError {
     DeviceNotActive,
     /// Attempting to use hinting when not enabled
     HintingNotEnabled,
+    /// Attempting to use free-page reporting when not enabled
+    ReportingNotEnabled,
+    /// A free-page hinting run is in flight; stop it before pausing reporting
+    HintingRunActive,
+    /// Free-page reporting is paused; resume it before starting a hinting run
+    ReportingPaused,
     /// EventFd error: {0}
     EventFd(std::io::Error),
     /// Received error while sending an interrupt: {0}

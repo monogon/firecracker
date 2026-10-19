@@ -15,7 +15,7 @@ use crate::EventManager;
 use crate::builder::StartMicrovmError;
 use crate::cpu_config::templates::{CustomCpuTemplate, GuestConfigError};
 use crate::device_manager::pci_mngr::PciManagerError;
-use crate::devices::virtio::balloon::device::{HintingStatus, StartHintingCmd};
+use crate::devices::virtio::balloon::device::{HintingStatus, ReportingStatus, StartHintingCmd};
 use crate::devices::virtio::device::VirtioDeviceId;
 use crate::devices::virtio::mem::VirtioMemStatus;
 use crate::logger::{LoggerConfig, info, warn, *};
@@ -144,6 +144,12 @@ pub enum VmmAction {
     GetFreePageHintingStatus,
     /// Stops a free page hinting run
     StopFreePageHinting,
+    /// Pause free page reporting
+    PauseFreePageReporting,
+    /// Resume free page reporting
+    ResumeFreePageReporting,
+    /// Retrieve whether free page reporting is paused
+    GetFreePageReportingStatus,
     /// Update existing block device properties such as `path_on_host` or `rate_limiter`.
     UpdateBlockDevice(BlockDeviceUpdateConfig),
     /// Update a network interface, after microVM start. Currently, the only updatable properties
@@ -254,6 +260,8 @@ pub enum VmmData {
     VirtioMemStatus(VirtioMemStatus),
     /// The status of the virtio-balloon hinting run
     HintingStatus(HintingStatus),
+    /// The status of virtio-balloon free page reporting
+    ReportingStatus(ReportingStatus),
     /// The guest memory mapping information.
     MemoryMappings(MemoryMapingsResponse),
     /// The guest memory resident and empty pages information
@@ -530,6 +538,9 @@ impl<'a> PrebootApiController<'a> {
             | StartFreePageHinting(_)
             | GetFreePageHintingStatus
             | StopFreePageHinting
+            | PauseFreePageReporting
+            | ResumeFreePageReporting
+            | GetFreePageReportingStatus
             | HotUnplugDevice(_)
             | GetMemoryMappings
             | GetMemory
@@ -851,6 +862,27 @@ impl RuntimeApiController {
                 .expect("Poisoned lock")
                 .stop_balloon_hinting()
                 .map(|_| VmmData::Empty)
+                .map_err(VmmActionError::BalloonUpdate),
+            PauseFreePageReporting => self
+                .vmm
+                .lock()
+                .expect("Poisoned lock")
+                .pause_balloon_reporting()
+                .map(|_| VmmData::Empty)
+                .map_err(VmmActionError::BalloonUpdate),
+            ResumeFreePageReporting => self
+                .vmm
+                .lock()
+                .expect("Poisoned lock")
+                .resume_balloon_reporting()
+                .map(|_| VmmData::Empty)
+                .map_err(VmmActionError::BalloonUpdate),
+            GetFreePageReportingStatus => self
+                .vmm
+                .lock()
+                .expect("Poisoned lock")
+                .get_balloon_reporting_status()
+                .map(VmmData::ReportingStatus)
                 .map_err(VmmActionError::BalloonUpdate),
             UpdateBlockDevice(new_cfg) => self.update_block_device(new_cfg),
             UpdateNetworkInterface(netif_update) => self.update_net_rate_limiters(netif_update),

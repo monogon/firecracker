@@ -149,6 +149,9 @@ def validate_fc_metrics(metrics):
             "free_page_hint_count",
             "free_page_hint_freed",
             "free_page_hint_fails",
+            "reporting_pause_count",
+            "reporting_resume_count",
+            "free_page_report_deferred",
         ],
         "block": block_metrics,
         "deprecated_api": [

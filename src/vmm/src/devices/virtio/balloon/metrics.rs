@@ -75,6 +75,12 @@ pub(super) struct BalloonDeviceMetrics {
     pub free_page_hint_freed: SharedIncMetric,
     /// Number of errors occurred while hinting
     pub free_page_hint_fails: SharedIncMetric,
+    /// Number of times free page reporting was paused
+    pub reporting_pause_count: SharedIncMetric,
+    /// Number of times free page reporting was resumed
+    pub reporting_resume_count: SharedIncMetric,
+    /// Number of free page reporting notifications deferred because reporting was paused
+    pub free_page_report_deferred: SharedIncMetric,
 }
 impl BalloonDeviceMetrics {
     /// Const default construction.
@@ -92,6 +98,9 @@ impl BalloonDeviceMetrics {
             free_page_hint_count: SharedIncMetric::new(),
             free_page_hint_freed: SharedIncMetric::new(),
             free_page_hint_fails: SharedIncMetric::new(),
+            reporting_pause_count: SharedIncMetric::new(),
+            reporting_resume_count: SharedIncMetric::new(),
+            free_page_report_deferred: SharedIncMetric::new(),
         }
     }
 }

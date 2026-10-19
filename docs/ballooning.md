@@ -346,6 +346,33 @@ comes with trade-offs between performance and memory reclaimed; a good target to
 maximise memory reclaim is to have the reported ranges match the backing page
 size.
 
+### Pausing free page reporting
+
+Free page reporting can be paused and resumed post-boot, for example to make
+sure no guest memory is discarded while the guest memory is being copied:
+
+```console
+curl --unix-socket $socket_location -i -X PATCH 'http://localhost/balloon/reporting/pause'
+curl --unix-socket $socket_location -i -X GET 'http://localhost/balloon/reporting/status'
+curl --unix-socket $socket_location -i -X PATCH 'http://localhost/balloon/reporting/resume'
+```
+
+While reporting is paused, the device leaves the reports it receives in the
+reporting queue without discarding or acknowledging them. The guest driver
+keeps reported pages isolated until they are acknowledged, so they cannot be
+reused by the guest in the meantime, and the driver stops reporting further
+pages until the outstanding reports are acknowledged. Resuming reporting
+processes the deferred reports right away. Both requests are idempotent, take
+no body, and fail if free page reporting was not enabled pre-boot.
+
+Pausing reporting fails while a free page hinting run is in progress (started
+and not stopped yet), and starting a hinting run fails while reporting is
+paused, since hinting would discard guest memory as well.
+
+The paused state is not saved in snapshots: a microVM restored from a snapshot
+always has free page reporting running, and it processes the reports that were
+left in the queue when the snapshot was taken.
+
 ## Virtio balloon free page hinting
 
 Free page hinting is a

@@ -130,6 +130,13 @@ struct BalloonStat {
 // SAFETY: Safe because BalloonStat only contains plain data.
 unsafe impl ByteValued for BalloonStat {}
 
+/// Returned to the API for get free page reporting status
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, Serialize)]
+pub struct ReportingStatus {
+    /// Whether free page reporting is currently paused.
+    pub paused: bool,
+}
+
 /// Holds configuration details for the balloon device.
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize)]
 pub struct BalloonConfig {
@@ -269,6 +276,12 @@ pub struct Balloon {
 
     // Holds state for free page hinting
     pub(crate) hinting_state: HintingState,
+
+    // Whether free page reporting is paused. While paused, reported pages stay in the reporting
+    // queue without being discarded or acknowledged. This is runtime-only state and not saved in
+    // snapshots: a restored device resumes reporting, and the kick on restore processes any
+    // reports left in the queue.
+    pub(crate) reporting_paused: bool,
 }
 
 impl Balloon {
@@ -333,6 +346,7 @@ impl Balloon {
             latest_stats: BalloonStats::default(),
             pfn_buffer: [0u32; MAX_PAGE_COMPACT_BUFFER],
             hinting_state: Default::default(),
+            reporting_paused: false,
         })
     }
 
@@ -627,6 +641,13 @@ impl Balloon {
             .ok_or(BalloonError::DeviceNotActive)?
             .mem;
 
+        // The guest driver keeps reported pages isolated until we acknowledge them, so leaving
+        // the reports in the queue defers the discards without the guest using these pages.
+        if self.reporting_paused {
+            METRICS.free_page_report_deferred.inc();
+            return Ok(());
+        }
+
         let idx = self.free_page_reporting_idx();
         let queue = &mut self.queues[idx];
         let mut needs_interrupt = false;
@@ -841,6 +862,11 @@ impl Balloon {
             return Err(BalloonError::HintingNotEnabled);
         }
 
+        // Pausing reporting promises that no guest memory gets discarded until it is resumed.
+        if self.reporting_paused {
+            return Err(BalloonError::ReportingPaused);
+        }
+
         let mut cmd_id = self.hinting_state.last_cmd_id.wrapping_add(1);
         // 0 and 1 are reserved and cannot be used to start a hinting run
         if cmd_id <= 1 {
@@ -872,6 +898,63 @@ impl Balloon {
         } else {
             self.update_free_page_hint_cmd(FREE_PAGE_HINT_DONE)
         }
+    }
+
+    /// Whether a hinting run was started and has not been stopped yet, so the guest may still
+    /// hint pages that we would discard.
+    fn hinting_run_active(&self) -> bool {
+        self.hinting_state.host_cmd != FREE_PAGE_HINT_STOP
+            && self.hinting_state.host_cmd != FREE_PAGE_HINT_DONE
+    }
+
+    /// Pauses free page reporting: reports are left in the queue, and the guest memory they
+    /// cover is not discarded until reporting is resumed.
+    pub(crate) fn pause_reporting(&mut self) -> Result<(), BalloonError> {
+        if !self.free_page_reporting() {
+            return Err(BalloonError::ReportingNotEnabled);
+        }
+
+        if self.hinting_run_active() {
+            return Err(BalloonError::HintingRunActive);
+        }
+
+        if !self.reporting_paused {
+            self.reporting_paused = true;
+            METRICS.reporting_pause_count.inc();
+            info!("balloon: free-page reporting paused.");
+        }
+
+        Ok(())
+    }
+
+    /// Resumes free page reporting and processes the reports deferred while it was paused.
+    pub(crate) fn resume_reporting(&mut self) -> Result<(), BalloonError> {
+        if !self.free_page_reporting() {
+            return Err(BalloonError::ReportingNotEnabled);
+        }
+
+        if self.reporting_paused {
+            self.reporting_paused = false;
+            METRICS.reporting_resume_count.inc();
+            info!("balloon: free-page reporting resumed.");
+        }
+
+        if self.is_activated() {
+            self.process_free_page_reporting_queue()?;
+        }
+
+        Ok(())
+    }
+
+    /// Returns whether free page reporting is paused.
+    pub(crate) fn get_reporting_status(&self) -> Result<ReportingStatus, BalloonError> {
+        if !self.free_page_reporting() {
+            return Err(BalloonError::ReportingNotEnabled);
+        }
+
+        Ok(ReportingStatus {
+            paused: self.reporting_paused,
+        })
     }
 
     /// Return the config of the balloon device.
@@ -1654,6 +1737,122 @@ pub(crate) mod tests {
             1,
             invoke_handler_for_queue_event(&mut th.device(), reporting_idx)
         );
+    }
+
+    #[test]
+    fn test_reporting_pause_resume() {
+        let mem = create_virtio_mem();
+        let mut th =
+            VirtioTestHelper::<Balloon>::new(&mem, Balloon::new(0, true, 0, false, true).unwrap());
+        th.activate_device(&mem);
+
+        let page_size = host_page_size() as u64;
+        #[allow(clippy::cast_possible_truncation)]
+        let page_size_chain = page_size as u32;
+        let reporting_idx = th.device().free_page_reporting_idx();
+        let safe_addr = align_up(th.data_address(), page_size);
+        let page = vec![0xaau8; u64_to_usize(page_size)];
+        mem.write_slice(&page, GuestAddress(safe_addr)).unwrap();
+
+        assert!(!th.device().get_reporting_status().unwrap().paused);
+        check_metric_after_block!(
+            METRICS.reporting_pause_count,
+            1,
+            th.device().pause_reporting().unwrap()
+        );
+        // Pausing is idempotent.
+        check_metric_after_block!(
+            METRICS.reporting_pause_count,
+            0,
+            th.device().pause_reporting().unwrap()
+        );
+        assert!(th.device().get_reporting_status().unwrap().paused);
+
+        // While paused, reports are neither discarded nor acknowledged.
+        let freed_before = METRICS.free_page_report_freed.count();
+        th.add_scatter_gather(reporting_idx, 0, &[(0, safe_addr, page_size_chain, 0)]);
+        th.device().queue_evts[reporting_idx].write(1).unwrap();
+        check_metric_after_block!(
+            METRICS.free_page_report_deferred,
+            1,
+            th.device()
+                .process_free_page_reporting_queue_event()
+                .unwrap()
+        );
+        assert!(!th.device().interrupt_trigger().has_pending_interrupt(
+            VirtioInterruptType::Queue(reporting_idx.try_into().unwrap())
+        ));
+        assert_eq!(METRICS.free_page_report_freed.count(), freed_before);
+        assert_eq!(th.device().queues[reporting_idx].next_used.0, 0);
+        let mut actual = vec![0u8; page.len()];
+        mem.read_slice(&mut actual, GuestAddress(safe_addr))
+            .unwrap();
+        assert_eq!(actual, page);
+
+        // Resuming processes the deferred report right away.
+        check_metric_after_block!(
+            METRICS.free_page_report_freed,
+            page_size,
+            th.device().resume_reporting().unwrap()
+        );
+        assert!(!th.device().get_reporting_status().unwrap().paused);
+        assert_eq!(th.device().queues[reporting_idx].next_used.0, 1);
+        mem.read_slice(&mut actual, GuestAddress(safe_addr))
+            .unwrap();
+        assert_eq!(actual, vec![0u8; page.len()]);
+
+        // Resuming is idempotent.
+        check_metric_after_block!(
+            METRICS.reporting_resume_count,
+            0,
+            th.device().resume_reporting().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reporting_pause_not_enabled() {
+        let mut balloon = Balloon::new(0, true, 0, true, false).unwrap();
+        assert!(matches!(
+            balloon.pause_reporting(),
+            Err(BalloonError::ReportingNotEnabled)
+        ));
+        assert!(matches!(
+            balloon.resume_reporting(),
+            Err(BalloonError::ReportingNotEnabled)
+        ));
+        assert!(matches!(
+            balloon.get_reporting_status(),
+            Err(BalloonError::ReportingNotEnabled)
+        ));
+    }
+
+    #[test]
+    fn test_reporting_pause_and_hinting_exclusive() {
+        let mem = create_virtio_mem();
+        let mut th =
+            VirtioTestHelper::<Balloon>::new(&mem, Balloon::new(0, true, 0, true, true).unwrap());
+        th.activate_device(&mem);
+
+        // A started hinting run may still discard memory, so reporting cannot be paused.
+        th.device()
+            .start_hinting(StartHintingCmd::default())
+            .unwrap();
+        assert!(matches!(
+            th.device().pause_reporting(),
+            Err(BalloonError::HintingRunActive)
+        ));
+        th.device().stop_hinting().unwrap();
+        th.device().pause_reporting().unwrap();
+
+        // While reporting is paused, no hinting run can be started.
+        assert!(matches!(
+            th.device().start_hinting(StartHintingCmd::default()),
+            Err(BalloonError::ReportingPaused)
+        ));
+        th.device().resume_reporting().unwrap();
+        th.device()
+            .start_hinting(StartHintingCmd::default())
+            .unwrap();
     }
 
     struct HintingTestHelper<'a> {

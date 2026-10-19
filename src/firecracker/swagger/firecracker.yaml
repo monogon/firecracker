@@ -184,7 +184,9 @@ paths:
         204:
           description: Free page hinting run started.
         400:
-          description: The balloon free hinting was not enabled when the device was configured.
+          description:
+            The balloon free hinting was not enabled when the device was configured, or free page
+            reporting is paused.
           schema:
             $ref: "#/definitions/Error"
         default:
@@ -219,6 +221,66 @@ paths:
           description: Free page hinting run stopped.
         400:
           description: The balloon free hinting was not enabled when the device was configured.
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal Server Error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /balloon/reporting/pause:
+    patch:
+      summary: Pauses free page reporting, only if enabled pre-boot.
+      description:
+        Defers all free page reporting discards until reporting is resumed. Reported pages
+        stay in the reporting queue unacknowledged, and the guest driver keeps them isolated
+        until they are acknowledged, so no guest memory is discarded through reporting while
+        paused. Fails while a free page hinting run is in progress. Idempotent.
+      operationId: pauseBalloonReporting
+      responses:
+        204:
+          description: Free page reporting paused.
+        400:
+          description:
+            Free page reporting was not enabled when the device was configured, or a free page
+            hinting run is in progress.
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal Server Error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /balloon/reporting/resume:
+    patch:
+      summary: Resumes free page reporting, only if enabled pre-boot.
+      description:
+        Re-enables free page reporting and immediately processes the reports deferred while
+        it was paused. Idempotent.
+      operationId: resumeBalloonReporting
+      responses:
+        204:
+          description: Free page reporting resumed.
+        400:
+          description: Free page reporting was not enabled when the device was configured.
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal Server Error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /balloon/reporting/status:
+    get:
+      summary: Returns whether free page reporting is paused, only if enabled pre-boot.
+      operationId: describeBalloonReporting
+      responses:
+        200:
+          description: The free page reporting status.
+          schema:
+            $ref: "#/definitions/BalloonReportingStatus"
+        400:
+          description: Free page reporting was not enabled when the device was configured.
           schema:
             $ref: "#/definitions/Error"
         default:
@@ -1087,6 +1149,17 @@ definitions:
       guest_cmd:
         description: The last command provided by the guest.
         type: integer
+
+  BalloonReportingStatus:
+    type: object
+    description:
+      Describes the free page reporting status.
+    required:
+      - paused
+    properties:
+      paused:
+        description: Whether free page reporting is currently paused.
+        type: boolean
 
   BalloonStatsUpdate:
     type: object

@@ -130,7 +130,7 @@ use vmm_sys_util::terminal::Terminal;
 use vstate::vcpu::{self, VcpuSendEventError};
 
 use crate::cpu_config::templates::CpuConfiguration;
-use crate::devices::virtio::balloon::device::{HintingStatus, StartHintingCmd};
+use crate::devices::virtio::balloon::device::{HintingStatus, ReportingStatus, StartHintingCmd};
 use crate::devices::virtio::balloon::{
     BALLOON_DEV_ID, Balloon, BalloonConfig, BalloonError, BalloonStats,
 };
@@ -689,6 +689,30 @@ impl Vmm {
         self.device_manager
             .with_virtio_device(BALLOON_DEV_ID, |dev: &mut Balloon| dev.stop_hinting())??;
         Ok(())
+    }
+
+    /// Pauses balloon free page reporting
+    pub fn pause_balloon_reporting(&mut self) -> Result<(), VmmError> {
+        self.device_manager
+            .with_virtio_device(BALLOON_DEV_ID, |dev: &mut Balloon| dev.pause_reporting())??;
+        Ok(())
+    }
+
+    /// Resumes balloon free page reporting
+    pub fn resume_balloon_reporting(&mut self) -> Result<(), VmmError> {
+        self.device_manager
+            .with_virtio_device(BALLOON_DEV_ID, |dev: &mut Balloon| dev.resume_reporting())??;
+        Ok(())
+    }
+
+    /// Retrieves whether balloon free page reporting is paused
+    pub fn get_balloon_reporting_status(&mut self) -> Result<ReportingStatus, VmmError> {
+        let status = self
+            .device_manager
+            .with_virtio_device(BALLOON_DEV_ID, |dev: &mut Balloon| {
+                dev.get_reporting_status()
+            })??;
+        Ok(status)
     }
 
     /// Signals Vmm to stop and exit.

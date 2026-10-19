@@ -208,6 +208,9 @@ impl ParsedRequest {
                 VmmData::HintingStatus(hinting_status) => {
                     Self::success_response_with_data(hinting_status)
                 }
+                VmmData::ReportingStatus(reporting_status) => {
+                    Self::success_response_with_data(reporting_status)
+                }
                 VmmData::InstanceInformation(info) => Self::success_response_with_data(info),
                 VmmData::VmmVersion(version) => Self::success_response_with_data(
                     &serde_json::json!({ "firecracker_version": version.as_str() }),
@@ -365,7 +368,7 @@ pub mod tests {
     use micro_http::HttpConnection;
     use vmm::builder::StartMicrovmError;
     use vmm::cpu_config::templates::test_utils::build_test_template;
-    use vmm::devices::virtio::balloon::device::HintingStatus;
+    use vmm::devices::virtio::balloon::device::{HintingStatus, ReportingStatus};
     use vmm::resources::VmmConfig;
     use vmm::rpc_interface::VmmActionError;
     use vmm::vmm_config::balloon::{BalloonDeviceConfig, BalloonStats};
@@ -617,6 +620,9 @@ pub mod tests {
                 VmmData::HintingStatus(status) => {
                     http_response(&serde_json::to_string(status).unwrap(), 200)
                 }
+                VmmData::ReportingStatus(status) => {
+                    http_response(&serde_json::to_string(status).unwrap(), 200)
+                }
                 VmmData::Empty => http_response("", 204),
                 VmmData::FullVmConfig(cfg) => {
                     http_response(&serde_json::to_string(cfg).unwrap(), 200)
@@ -650,6 +656,7 @@ pub mod tests {
         };
 
         verify_ok_response_with(VmmData::BalloonConfig(BalloonDeviceConfig::default()));
+        verify_ok_response_with(VmmData::ReportingStatus(ReportingStatus { paused: true }));
         verify_ok_response_with(VmmData::BalloonStats(BalloonStats {
             swap_in: Some(1),
             swap_out: Some(1),
@@ -718,6 +725,18 @@ pub mod tests {
         let mut connection = HttpConnection::new(receiver);
         sender
             .write_all(http_request("GET", "/balloon/hinting/status", None).as_bytes())
+            .unwrap();
+        connection.try_read().unwrap();
+        let req = connection.pop_parsed_request().unwrap();
+        ParsedRequest::try_from(&req).unwrap();
+    }
+
+    #[test]
+    fn test_try_from_get_balloon_reporting() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let mut connection = HttpConnection::new(receiver);
+        sender
+            .write_all(http_request("GET", "/balloon/reporting/status", None).as_bytes())
             .unwrap();
         connection.try_read().unwrap();
         let req = connection.pop_parsed_request().unwrap();
@@ -1038,6 +1057,15 @@ pub mod tests {
         connection.try_read().unwrap();
         let req = connection.pop_parsed_request().unwrap();
         ParsedRequest::try_from(&req).unwrap();
+
+        for path in ["/balloon/reporting/pause", "/balloon/reporting/resume"] {
+            sender
+                .write_all(http_request("PATCH", path, None).as_bytes())
+                .unwrap();
+            connection.try_read().unwrap();
+            let req = connection.pop_parsed_request().unwrap();
+            ParsedRequest::try_from(&req).unwrap();
+        }
     }
 
     #[test]
