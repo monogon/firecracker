@@ -39,7 +39,7 @@ use crate::devices::{DeviceError, report_net_event_fail};
 use crate::dumbo::pdu::arp::ETH_IPV4_FRAME_LEN;
 use crate::dumbo::pdu::ethernet::{EthernetFrame, PAYLOAD_OFFSET};
 use crate::impl_device_type;
-use crate::logger::{IncMetric, METRICS, error};
+use crate::logger::{IncMetric, METRICS, error, warn};
 use crate::mmds::data_store::Mmds;
 use crate::mmds::ns::MmdsNetworkStack;
 use crate::rate_limiter::{BucketUpdate, RateLimiter, TokenType};
@@ -707,8 +707,15 @@ impl Net {
 
         let frame_len = frame_iovec.len() as usize - vnet_hdr_len();
         if let Err(err) = validate_tx_csum_offload(headers, frame_len) {
-            error!("Dropping TX frame with invalid checksum offload metadata: {err}");
+            // The guest controls how often this happens, so only log the first occurrence. The
+            // metric counts all of them.
             net_metrics.tx_csum_rejected.inc();
+            if net_metrics.tx_csum_rejected.count() == 1 {
+                warn!(
+                    "Dropping TX frame with invalid checksum offload metadata: {err}. Further \
+                     dropped frames are only counted in the tx_csum_rejected metric."
+                );
+            }
             return Ok(false);
         }
 
@@ -728,8 +735,16 @@ impl Net {
                 net_metrics.tx_count.inc();
             }
             Err(err) => {
-                error!("Failed to write to tap: {:?}", err);
+                // The guest can make writes to the TAP fail repeatedly, so only log the first
+                // failure. The metric counts all of them.
                 net_metrics.tap_write_fails.inc();
+                if net_metrics.tap_write_fails.count() == 1 {
+                    error!(
+                        "Failed to write to tap: {:?}. Further failures are only counted in the \
+                         tap_write_fails metric.",
+                        err
+                    );
+                }
             }
         };
         Ok(false)
