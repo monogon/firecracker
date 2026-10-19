@@ -425,15 +425,10 @@ impl Request {
             RequestType::GetDeviceID if req.data_len < VIRTIO_BLK_ID_BYTES => {
                 return Err(VirtioBlockError::InvalidDataLength);
             }
-            RequestType::Discard => {
-                if req.data_len == 0 || !req.data_len.is_multiple_of(DISCARD_SEGMENT_SIZE) {
-                    return Err(VirtioBlockError::InvalidDataLength);
-                }
-            }
-            RequestType::WriteZeroes => {
-                if req.data_len == 0 || req.data_len % DISCARD_SEGMENT_SIZE != 0 {
-                    return Err(VirtioBlockError::InvalidDataLength);
-                }
+            RequestType::Discard | RequestType::WriteZeroes
+                if req.data_len == 0 || !req.data_len.is_multiple_of(DISCARD_SEGMENT_SIZE) =>
+            {
+                return Err(VirtioBlockError::InvalidDataLength);
             }
             _ => {}
         }

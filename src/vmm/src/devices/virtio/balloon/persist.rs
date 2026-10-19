@@ -260,8 +260,7 @@ mod tests {
         let serialized_data = bitcode::serialize(&balloon.save()).unwrap();
         let restored_state = bitcode::deserialize(&serialized_data).unwrap();
         let restored_balloon =
-            Balloon::restore(BalloonConstructorArgs { mem: guest_mem }, &restored_state)
-        .unwrap();
+            Balloon::restore(BalloonConstructorArgs { mem: guest_mem }, &restored_state).unwrap();
 
         assert!(restored_balloon.free_page_hinting());
         assert!(restored_balloon.free_page_hinting_wait_ack());

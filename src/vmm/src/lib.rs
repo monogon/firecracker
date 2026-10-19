@@ -165,8 +165,8 @@ use crate::vstate::memory::{GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 #[cfg(target_arch = "aarch64")]
 use crate::vstate::vcpu::VcpuState;
 pub use crate::vstate::vcpu::{Vcpu, VcpuConfig, VcpuEvent, VcpuHandle, VcpuResponse};
-pub use crate::vstate::vm::{StartVcpusError, Vm};
 use crate::vstate::vm::mincore_bitmap;
+pub use crate::vstate::vm::{StartVcpusError, Vm};
 
 /// Shorthand type for the EventManager flavour used by Firecracker.
 pub type EventManager = BaseEventManager<Arc<Mutex<dyn MutEventSubscriber>>>;
@@ -781,7 +781,7 @@ impl Vmm {
         let kvm_vm = self
             .vm
             .as_kvm()
-            .ok_or(VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
+            .ok_or_else(|| VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
         for mem_slot in kvm_vm
             .guest_memory()
             .iter()
@@ -835,7 +835,7 @@ impl Vmm {
         let kvm_vm = self
             .vm
             .as_kvm()
-            .ok_or(VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
+            .ok_or_else(|| VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
 
         for mem_slot in kvm_vm
             .guest_memory()

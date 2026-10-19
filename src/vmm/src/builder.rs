@@ -565,8 +565,7 @@ pub fn build_microvm_from_snapshot(
     // `send` on a dropped receiver and panic. Gating the attach keeps the channel
     // paired with its consumer (and leaves the vCPUs' gdb_event as None otherwise).
     #[cfg(all(feature = "gdb", target_arch = "x86_64"))]
-    let gdb_socket_path =
-        resolve_gdb_socket_path(&vm_resources.machine_config.gdb_socket_path);
+    let gdb_socket_path = resolve_gdb_socket_path(&vm_resources.machine_config.gdb_socket_path);
 
     #[cfg(all(feature = "gdb", target_arch = "x86_64"))]
     let gdb_rx = if gdb_socket_path.is_some() {

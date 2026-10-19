@@ -470,7 +470,12 @@ mod tests {
             gdb_socket_path: None,
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
-        assert!(parsed_request.parsing_info().take_deprecation_message().is_none());
+        assert!(
+            parsed_request
+                .parsing_info()
+                .take_deprecation_message()
+                .is_none()
+        );
         assert_eq!(
             vmm_action_from_request(parsed_request),
             VmmAction::LoadSnapshot(expected_config)
