@@ -127,6 +127,7 @@ def validate_fc_metrics(metrics):
         "tx_rate_limiter_event_count",
         "tx_rate_limiter_throttled",
         "tx_spoofed_mac_count",
+        "tx_csum_rejected",
         "tx_remaining_reqs_count",
         {"tap_write_agg": latency_agg_metrics_fields},
     ]

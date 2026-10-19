@@ -53,6 +53,108 @@ pub(crate) const fn vnet_hdr_len() -> usize {
     mem::size_of::<virtio_net_hdr_v1>()
 }
 
+/// `virtio_net_hdr` flag: the device has to compute the checksum from `csum_start` on, and store
+/// it at `csum_start + csum_offset`.
+const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+const VNET_HDR_FLAGS_OFFSET: usize = mem::offset_of!(virtio_net_hdr_v1, flags);
+// `csum_start` and `csum_offset` are the first two fields of the union after `gso_size`.
+const VNET_HDR_CSUM_START_OFFSET: usize = mem::offset_of!(virtio_net_hdr_v1, __bindgen_anon_1);
+const VNET_HDR_CSUM_OFFSET_OFFSET: usize = VNET_HDR_CSUM_START_OFFSET + 2;
+
+const ETHERTYPE_OFFSET: usize = 12;
+const ETHERTYPE_IPV4: u16 = 0x0800;
+const ETHERTYPE_IPV6: u16 = 0x86dd;
+const ETHERTYPE_VLAN: u16 = 0x8100;
+const ETHERTYPE_QINQ: u16 = 0x88a8;
+const VLAN_TAG_LEN: usize = 4;
+const MAX_VLAN_TAGS: usize = 2;
+const IPV4_MIN_HEADER_LEN: usize = 20;
+const IPV6_HEADER_LEN: usize = 40;
+
+/// Invalid checksum offload metadata in a TX frame.
+#[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
+pub enum TxCsumError {
+    /// frame too short to locate the network header
+    FrameTooShort,
+    /// checksum offload on a non-IP frame (ethertype {0:#06x})
+    NotIp(u16),
+    /// IPv4 header length {0} is below the minimum
+    Ipv4HeaderTooShort(usize),
+    /// csum_start {0} is inside the headers (network header ends at {1})
+    CsumStartInHeaders(usize, usize),
+    /// checksum field end {0} is past the end of the frame ({1})
+    CsumPastFrameEnd(usize, usize),
+}
+
+/// Validates the checksum offload request of a TX frame, before passing it to the host kernel.
+///
+/// If the guest asks for the checksum to be computed (`VIRTIO_NET_HDR_F_NEEDS_CSUM`), the
+/// checksum must start after the network header of an IP frame and the checksum field must be
+/// within the frame. The host kernel trusts this metadata in places, and some kernels misbehave
+/// on bogus values.
+///
+/// `headers` holds the VNET header followed by the start of the frame, as far as it was read, and
+/// `frame_len` is the length of the whole frame (without the VNET header).
+fn validate_tx_csum_offload(headers: &[u8], frame_len: usize) -> Result<(), TxCsumError> {
+    let read_u16 = |buf: &[u8], offset: usize, to_native: fn(u16) -> u16| {
+        buf.get(offset..offset + 2)
+            .map(|b| to_native(u16::from_ne_bytes([b[0], b[1]])))
+    };
+
+    let Some((vnet_hdr, frame)) = headers.split_at_checked(vnet_hdr_len()) else {
+        return Err(TxCsumError::FrameTooShort);
+    };
+    if vnet_hdr[VNET_HDR_FLAGS_OFFSET] & VIRTIO_NET_HDR_F_NEEDS_CSUM == 0 {
+        return Ok(());
+    }
+    // VIRTIO_F_VERSION_1 is always negotiated, so the VNET header is little endian.
+    let csum_start =
+        usize::from(read_u16(vnet_hdr, VNET_HDR_CSUM_START_OFFSET, u16::from_le).unwrap());
+    let csum_offset =
+        usize::from(read_u16(vnet_hdr, VNET_HDR_CSUM_OFFSET_OFFSET, u16::from_le).unwrap());
+
+    let mut ethertype_offset = ETHERTYPE_OFFSET;
+    let mut ethertype =
+        read_u16(frame, ethertype_offset, u16::from_be).ok_or(TxCsumError::FrameTooShort)?;
+    for _ in 0..MAX_VLAN_TAGS {
+        if ethertype != ETHERTYPE_VLAN && ethertype != ETHERTYPE_QINQ {
+            break;
+        }
+        ethertype_offset += VLAN_TAG_LEN;
+        ethertype =
+            read_u16(frame, ethertype_offset, u16::from_be).ok_or(TxCsumError::FrameTooShort)?;
+    }
+    let network_header = ethertype_offset + 2;
+
+    let network_header_end = match ethertype {
+        ETHERTYPE_IPV4 => {
+            let version_ihl = *frame
+                .get(network_header)
+                .ok_or(TxCsumError::FrameTooShort)?;
+            let header_len = usize::from(version_ihl & 0x0f) * 4;
+            if header_len < IPV4_MIN_HEADER_LEN {
+                return Err(TxCsumError::Ipv4HeaderTooShort(header_len));
+            }
+            network_header + header_len
+        }
+        ETHERTYPE_IPV6 => network_header + IPV6_HEADER_LEN,
+        _ => return Err(TxCsumError::NotIp(ethertype)),
+    };
+
+    if csum_start < network_header_end {
+        return Err(TxCsumError::CsumStartInHeaders(
+            csum_start,
+            network_header_end,
+        ));
+    }
+    let csum_field_end = csum_start + csum_offset + 2;
+    if csum_field_end > frame_len {
+        return Err(TxCsumError::CsumPastFrameEnd(csum_field_end, frame_len));
+    }
+
+    Ok(())
+}
+
 // This returns the maximum frame header length. This includes the VNET header plus
 // the maximum L2 frame header bytes which includes the ethernet frame header plus
 // the header IPv4 ARP header which is 28 bytes long.
@@ -258,6 +360,8 @@ pub struct Net {
     rx_frame_buf: [u8; MAX_BUFFER_SIZE],
 
     tx_frame_headers: [u8; frame_hdr_len()],
+    // The frame passed to the TAP: the TX frame with its headers replaced by our copy of them.
+    tx_tap_buffer: IoVecBuffer,
 
     pub(crate) config_space: ConfigSpace,
     pub(crate) guest_mac: Option<MacAddr>,
@@ -336,6 +440,7 @@ impl Net {
             mmds_ns: None,
             metrics: NetMetricsPerDevice::alloc(id),
             tx_buffer: Default::default(),
+            tx_tap_buffer: Default::default(),
             rx_buffer: RxBuffers::new()?,
         })
     }
@@ -519,11 +624,13 @@ impl Net {
     // Tries to detour the frame to MMDS and if MMDS doesn't accept it, sends it on the host TAP.
     //
     // Returns whether MMDS consumed the frame.
+    #[allow(clippy::too_many_arguments)]
     fn write_to_mmds_or_tap(
         mmds_ns: Option<&mut MmdsNetworkStack>,
         rate_limiter: &mut RateLimiter,
         headers: &mut [u8],
         frame_iovec: &IoVecBuffer,
+        tap_buffer: &mut IoVecBuffer,
         tap: &mut Tap,
         guest_mac: Option<MacAddr>,
         net_metrics: &NetDeviceMetrics,
@@ -562,13 +669,14 @@ impl Net {
                 NetError::VnetHeaderMissing
             })?;
 
-        let headers = frame_bytes_from_buf(&headers[..header_len]).inspect_err(|_| {
+        let headers = &headers[..header_len];
+        let frame_headers = frame_bytes_from_buf(headers).inspect_err(|_| {
             error!("VNET headers missing in TX frame");
             net_metrics.tx_malformed_frames.inc();
         })?;
 
         if let Some(ns) = mmds_ns
-            && ns.is_mmds_frame(headers)
+            && ns.is_mmds_frame(frame_headers)
         {
             let mut frame = vec![0u8; frame_iovec.len() as usize - vnet_hdr_len()];
             // Ok to unwrap here, because we are passing a buffer that has the exact size
@@ -590,15 +698,29 @@ impl Net {
 
         // Check for guest MAC spoofing.
         if let Some(guest_mac) = guest_mac {
-            let _ = EthernetFrame::from_bytes(headers).map(|eth_frame| {
+            let _ = EthernetFrame::from_bytes(frame_headers).map(|eth_frame| {
                 if guest_mac != eth_frame.src_mac() {
                     net_metrics.tx_spoofed_mac_count.inc();
                 }
             });
         }
 
+        let frame_len = frame_iovec.len() as usize - vnet_hdr_len();
+        if let Err(err) = validate_tx_csum_offload(headers, frame_len) {
+            error!("Dropping TX frame with invalid checksum offload metadata: {err}");
+            net_metrics.tx_csum_rejected.inc();
+            return Ok(false);
+        }
+
+        // Pass the headers we validated to the TAP, rather than the guest memory we copied them
+        // from, which the guest can change in the meantime.
+        // SAFETY: `tap_buffer` is cleared below, while `headers` is still alive, and `headers` was
+        // read from `frame_iovec`, so it is not longer than it.
+        unsafe { tap_buffer.load_with_prefix(headers, frame_iovec) };
         let _metric = net_metrics.tap_write_agg.record_latency_metrics();
-        match Self::write_tap(tap, frame_iovec) {
+        let result = Self::write_tap(tap, tap_buffer);
+        tap_buffer.clear();
+        match result {
             Ok(_) => {
                 let len = u64::from(frame_iovec.len());
                 net_metrics.tx_bytes_count.add(len);
@@ -776,6 +898,7 @@ impl Net {
                 &mut self.tx_rate_limiter,
                 &mut self.tx_frame_headers,
                 &self.tx_buffer,
+                &mut self.tx_tap_buffer,
                 &mut self.tap,
                 self.guest_mac,
                 &self.metrics,
@@ -2003,6 +2126,168 @@ pub mod tests {
         assert_eq!(&buf[..600], &frame_2[..600]);
     }
 
+    /// Builds the VNET header plus frame headers of a frame needing checksum offload.
+    fn csum_offload_headers(
+        ethertypes: &[u16],
+        ip_header: &[u8],
+        csum_start: u16,
+        csum_offset: u16,
+    ) -> Vec<u8> {
+        let mut headers = vec![0u8; vnet_hdr_len()];
+        headers[VNET_HDR_FLAGS_OFFSET] = VIRTIO_NET_HDR_F_NEEDS_CSUM;
+        headers[VNET_HDR_CSUM_START_OFFSET..VNET_HDR_CSUM_START_OFFSET + 2]
+            .copy_from_slice(&csum_start.to_le_bytes());
+        headers[VNET_HDR_CSUM_OFFSET_OFFSET..VNET_HDR_CSUM_OFFSET_OFFSET + 2]
+            .copy_from_slice(&csum_offset.to_le_bytes());
+        // MAC addresses
+        headers.extend_from_slice(&[0x22; 12]);
+        for (i, ethertype) in ethertypes.iter().enumerate() {
+            if i > 0 {
+                // VLAN TCI
+                headers.extend_from_slice(&[0, 1]);
+            }
+            headers.extend_from_slice(&ethertype.to_be_bytes());
+        }
+        headers.extend_from_slice(ip_header);
+        headers
+    }
+
+    #[test]
+    fn test_validate_tx_csum_offload() {
+        // IPv4 with options (IHL 6), then a TCP header with its checksum at offset 16.
+        let ipv4 = [0x46u8];
+        let eth = 14;
+        let tcp_start = 14 + 24;
+        let frame_len = tcp_start + 20;
+
+        // No checksum offload requested: nothing to validate.
+        let mut headers = csum_offload_headers(&[0x0806], &[], 0, 0);
+        headers[VNET_HDR_FLAGS_OFFSET] = 0;
+        validate_tx_csum_offload(&headers, 42).unwrap();
+
+        let headers = csum_offload_headers(&[ETHERTYPE_IPV4], &ipv4, tcp_start, 16);
+        validate_tx_csum_offload(&headers, frame_len.into()).unwrap();
+        // The checksum field must be within the frame.
+        assert_eq!(
+            validate_tx_csum_offload(&headers, usize::from(frame_len) - 3),
+            Err(TxCsumError::CsumPastFrameEnd(
+                usize::from(tcp_start) + 18,
+                usize::from(frame_len) - 3
+            ))
+        );
+        // The checksum must not start in the IP header.
+        let headers = csum_offload_headers(&[ETHERTYPE_IPV4], &ipv4, tcp_start - 1, 16);
+        assert_eq!(
+            validate_tx_csum_offload(&headers, frame_len.into()),
+            Err(TxCsumError::CsumStartInHeaders(
+                usize::from(tcp_start) - 1,
+                usize::from(tcp_start)
+            ))
+        );
+        let headers = csum_offload_headers(&[ETHERTYPE_IPV4], &[0x44], tcp_start, 16);
+        assert_eq!(
+            validate_tx_csum_offload(&headers, frame_len.into()),
+            Err(TxCsumError::Ipv4HeaderTooShort(16))
+        );
+
+        // IPv6 headers are 40 bytes.
+        let headers = csum_offload_headers(&[ETHERTYPE_IPV6], &[0x60], eth + 40, 6);
+        validate_tx_csum_offload(&headers, 100).unwrap();
+        let headers = csum_offload_headers(&[ETHERTYPE_IPV6], &[0x60], eth + 39, 6);
+        validate_tx_csum_offload(&headers, 100).unwrap_err();
+
+        // VLAN tags move the network header.
+        let headers = csum_offload_headers(
+            &[ETHERTYPE_QINQ, ETHERTYPE_VLAN, ETHERTYPE_IPV4],
+            &[0x45],
+            eth + 8 + 20,
+            6,
+        );
+        validate_tx_csum_offload(&headers, 100).unwrap();
+        let headers = csum_offload_headers(&[ETHERTYPE_VLAN, ETHERTYPE_IPV4], &[0x45], eth + 20, 6);
+        validate_tx_csum_offload(&headers, 100).unwrap_err();
+
+        // Checksum offload only makes sense for IP.
+        let headers = csum_offload_headers(&[0x0806], &[], eth, 6);
+        assert_eq!(
+            validate_tx_csum_offload(&headers, 100),
+            Err(TxCsumError::NotIp(0x0806))
+        );
+        let headers = csum_offload_headers(
+            &[ETHERTYPE_VLAN, ETHERTYPE_VLAN, ETHERTYPE_VLAN],
+            &[],
+            eth,
+            6,
+        );
+        assert_eq!(
+            validate_tx_csum_offload(&headers, 100),
+            Err(TxCsumError::NotIp(ETHERTYPE_VLAN))
+        );
+
+        // Truncated frames.
+        let headers = csum_offload_headers(&[ETHERTYPE_IPV4], &[], eth + 20, 6);
+        assert_eq!(
+            validate_tx_csum_offload(&headers, 100),
+            Err(TxCsumError::FrameTooShort)
+        );
+        let headers = csum_offload_headers(&[], &[], eth, 6);
+        assert_eq!(
+            validate_tx_csum_offload(&headers, 100),
+            Err(TxCsumError::FrameTooShort)
+        );
+        assert_eq!(
+            validate_tx_csum_offload(&headers[..vnet_hdr_len() - 1], 100),
+            Err(TxCsumError::FrameTooShort)
+        );
+    }
+
+    #[test]
+    fn test_tx_csum_offload() {
+        use crate::vstate::memory::Bytes;
+
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
+        th.activate_net();
+        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
+        let frame_len = 200;
+
+        let mut write_frame = |th: &mut TestHelper, desc_idx: u16, csum_start: u16| {
+            let desc_list = [(desc_idx, 1000, 0)];
+            th.add_desc_chain(NetQueue::Tx, u64::from(desc_idx) * 1000, &desc_list);
+            let mut frame = th.write_tx_frame(&desc_list, frame_len);
+            let headers = csum_offload_headers(&[ETHERTYPE_IPV4], &[0x45], csum_start, 16);
+            frame[..headers.len()].copy_from_slice(&headers);
+            mem.write_slice(
+                &frame,
+                GuestAddress::new(th.txq.dtable[desc_idx as usize].addr.get()),
+            )
+            .unwrap();
+            frame
+        };
+
+        // A frame whose checksum would start in the IP header is dropped.
+        write_frame(&mut th, 0, 20);
+        check_metric_after_block!(
+            th.net().metrics.tx_csum_rejected,
+            1,
+            th.event_manager.run_with_timeout(100).unwrap()
+        );
+        th.txq.check_used_elem(0, 0, 0);
+        assert!(!tap_traffic_simulator.pop_rx_packet(&mut [0; 1000]));
+
+        // A valid one goes to the TAP.
+        let frame = write_frame(&mut th, 1, 34);
+        check_metric_after_block!(
+            th.net().metrics.tx_packets_count,
+            1,
+            th.event_manager.run_with_timeout(100).unwrap()
+        );
+        th.txq.check_used_elem(1, 1, 0);
+        let mut buf = vec![0; frame_len];
+        assert!(tap_traffic_simulator.pop_rx_packet(&mut buf[vnet_hdr_len()..]));
+        assert_eq!(&buf[vnet_hdr_len()..], &frame[vnet_hdr_len()..]);
+    }
+
     fn create_arp_request(
         src_mac: MacAddr,
         src_ip: Ipv4Addr,
@@ -2078,6 +2363,7 @@ pub mod tests {
                     &mut net.tx_rate_limiter,
                     &mut headers,
                     &buffer,
+                    &mut IoVecBuffer::default(),
                     &mut net.tap,
                     Some(src_mac),
                     &net.metrics,
@@ -2117,6 +2403,7 @@ pub mod tests {
                 &mut net.tx_rate_limiter,
                 &mut headers,
                 &buffer,
+                &mut IoVecBuffer::default(),
                 &mut net.tap,
                 Some(guest_mac),
                 &net.metrics,
@@ -2132,6 +2419,7 @@ pub mod tests {
                 &mut net.tx_rate_limiter,
                 &mut headers,
                 &buffer,
+                &mut IoVecBuffer::default(),
                 &mut net.tap,
                 Some(not_guest_mac),
                 &net.metrics,

@@ -197,6 +197,8 @@ pub struct NetDeviceMetrics {
     pub tx_rate_limiter_throttled: SharedIncMetric,
     /// Number of packets with a spoofed mac, sent by the guest.
     pub tx_spoofed_mac_count: SharedIncMetric,
+    /// Number of TX frames dropped because of invalid checksum offload metadata.
+    pub tx_csum_rejected: SharedIncMetric,
     /// Number of remaining requests in the TX queue.
     pub tx_remaining_reqs_count: SharedIncMetric,
 }
@@ -258,6 +260,8 @@ impl NetDeviceMetrics {
             .add(other.tx_rate_limiter_throttled.fetch_diff());
         self.tx_spoofed_mac_count
             .add(other.tx_spoofed_mac_count.fetch_diff());
+        self.tx_csum_rejected
+            .add(other.tx_csum_rejected.fetch_diff());
         self.tx_remaining_reqs_count
             .add(other.tx_remaining_reqs_count.fetch_diff());
     }

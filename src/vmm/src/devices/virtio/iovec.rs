@@ -128,6 +128,37 @@ impl IoVecBuffer {
         self.len = 0u32;
     }
 
+    /// Makes this buffer cover the same bytes as `src`, except for the first `prefix.len()` ones,
+    /// which are taken from `prefix` instead.
+    ///
+    /// # Safety
+    ///
+    /// `prefix` must stay valid as long as this buffer is used, and `prefix.len()` must not be
+    /// larger than `src.len()`.
+    pub unsafe fn load_with_prefix(&mut self, prefix: &[u8], src: &IoVecBuffer) {
+        debug_assert!(prefix.len() <= src.len() as usize);
+        self.clear();
+        self.vecs.push(iovec {
+            iov_base: prefix.as_ptr().cast_mut().cast::<c_void>(),
+            iov_len: prefix.len(),
+        });
+
+        let mut skip = prefix.len();
+        for vec in &src.vecs {
+            if skip >= vec.iov_len {
+                skip -= vec.iov_len;
+                continue;
+            }
+            self.vecs.push(iovec {
+                // SAFETY: `skip` is smaller than the length of the memory region `vec` covers.
+                iov_base: unsafe { vec.iov_base.add(skip) },
+                iov_len: vec.iov_len - skip,
+            });
+            skip = 0;
+        }
+        self.len = src.len;
+    }
+
     /// Reads a number of bytes from the `IoVecBuffer` starting at a given offset.
     ///
     /// This will try to fill `buf` reading bytes from the `IoVecBuffer` starting from
@@ -609,6 +640,25 @@ mod tests {
         mem.write_slice(&v, GuestAddress(0x20000)).unwrap();
 
         chain(mem, true)
+    }
+
+    #[test]
+    fn test_load_with_prefix() {
+        let data: Vec<u8> = (0..40).collect();
+        let src = IoVecBuffer::from(vec![&data[..5], &data[5..10], &data[10..40]]);
+
+        for prefix_len in [0, 3, 5, 7, 10, 25, 40] {
+            let prefix = vec![0xffu8; prefix_len];
+            let mut buf = IoVecBuffer::default();
+            // SAFETY: `prefix` outlives `buf` and is not longer than `src`.
+            unsafe { buf.load_with_prefix(&prefix, &src) };
+            assert_eq!(buf.len(), src.len());
+
+            let mut read = vec![0u8; data.len()];
+            buf.read_exact_volatile_at(&mut read, 0).unwrap();
+            assert_eq!(&read[..prefix_len], &prefix[..]);
+            assert_eq!(&read[prefix_len..], &data[prefix_len..]);
+        }
     }
 
     #[test]
