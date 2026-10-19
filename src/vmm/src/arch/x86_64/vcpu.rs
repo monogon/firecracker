@@ -7,18 +7,22 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use kvm_bindings::{
     CpuId, KVM_MAX_CPUID_ENTRIES, KVM_MAX_MSR_ENTRIES, Msrs, Xsave, kvm_debugregs, kvm_lapic_state,
-    kvm_mp_state, kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave, kvm_xsave2,
+    kvm_mp_state, kvm_msr_entry, kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave,
+    kvm_xsave2,
 };
 use kvm_ioctls::{VcpuExit, VcpuFd};
 use serde::{Deserialize, Serialize};
 use vmm_sys_util::fam::{self, FamStruct};
 
 use crate::arch::EntryPoint;
-use crate::arch::x86_64::generated::msr_index::{MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE};
+use crate::arch::x86_64::generated::msr_index::{
+    MSR_IA32_LASTBRANCHFROMIP, MSR_IA32_LASTINTTOIP, MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE,
+};
 use crate::arch::x86_64::interrupts;
 use crate::arch::x86_64::msr::{MsrError, create_boot_msr_entries};
 use crate::arch::x86_64::regs::{SetupFpuError, SetupRegistersError, SetupSpecialRegistersError};
@@ -45,6 +49,13 @@ const DEFERRED_MSRS: [u32; 1] = [
     // primed, or the timer can be initialized with a wrong expiry).
     MSR_IA32_TSC_DEADLINE,
 ];
+
+/// MSRs that are not restored from snapshots: the legacy last branch record MSRs.
+///
+/// Whether KVM saves and accepts these depends on the host (e.g. on AMD LBR virtualization), so a
+/// snapshot containing them can fail to restore on another host. Their values only describe the
+/// last branches taken, which the guest does not depend on, so they are dropped on restore.
+const MSRS_NOT_RESTORED: RangeInclusive<u32> = MSR_IA32_LASTBRANCHFROMIP..=MSR_IA32_LASTINTTOIP;
 
 /// Errors associated with the wrappers over KVM ioctls.
 #[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
@@ -95,6 +106,8 @@ pub enum KvmVcpuError {
     VcpuSetMsrs(kvm_ioctls::Error),
     /// Failed to set all KVM MSRs for this vCPU. Only a partial write was done.
     VcpuSetMsrsIncomplete,
+    /// Failed to rebuild MSR chunk after filtering: {0}
+    VcpuSetMsrsFam(vmm_sys_util::fam::Error),
     /// Failed to set KVM vcpu regs: {0}
     VcpuSetRegs(kvm_ioctls::Error),
     /// Failed to set KVM vcpu sregs: {0}
@@ -652,6 +665,48 @@ impl KvmVcpu {
         self.fd.set_tsc_khz(tsc_freq).map_err(SetTscError)
     }
 
+    /// Restores saved MSR chunks, leaving out the MSRs in [`MSRS_NOT_RESTORED`].
+    fn restore_msrs(&self, saved_msrs: &[Msrs]) -> Result<(), KvmVcpuError> {
+        for msrs in saved_msrs {
+            let entries = msrs.as_slice();
+            let kept: Vec<kvm_msr_entry> = entries
+                .iter()
+                .filter(|entry| {
+                    let restore = !MSRS_NOT_RESTORED.contains(&entry.index);
+                    if !restore && entry.data != 0 {
+                        warn!(
+                            "Dropping MSR {:#x} with non-zero value {:#x} while restoring.",
+                            entry.index, entry.data
+                        );
+                    }
+                    restore
+                })
+                .copied()
+                .collect();
+
+            let nmsrs = if kept.len() == entries.len() {
+                self.fd.set_msrs(msrs)
+            } else {
+                warn!(
+                    "Skipping {} MSR(s) this host cannot restore.",
+                    entries.len() - kept.len()
+                );
+                if kept.is_empty() {
+                    continue;
+                }
+                let kept_msrs = Msrs::from_entries(&kept).map_err(KvmVcpuError::VcpuSetMsrsFam)?;
+                self.fd.set_msrs(&kept_msrs)
+            }
+            .map_err(KvmVcpuError::VcpuSetMsrs)?;
+
+            if nmsrs < kept.len() {
+                return Err(KvmVcpuError::VcpuSetMsrsIncomplete);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Use provided state to populate KVM internal state.
     pub fn restore_state(&self, state: &VcpuState) -> Result<(), KvmVcpuError> {
         // Ordering requirements:
@@ -707,12 +762,7 @@ impl KvmVcpu {
         self.fd
             .set_lapic(&state.lapic)
             .map_err(KvmVcpuError::VcpuSetLapic)?;
-        for msrs in &state.saved_msrs {
-            let nmsrs = self.fd.set_msrs(msrs).map_err(KvmVcpuError::VcpuSetMsrs)?;
-            if nmsrs < msrs.as_fam_struct_ref().nmsrs as usize {
-                return Err(KvmVcpuError::VcpuSetMsrsIncomplete);
-            }
-        }
+        self.restore_msrs(&state.saved_msrs)?;
         self.fd
             .set_vcpu_events(&state.vcpu_events)
             .map_err(KvmVcpuError::VcpuSetVcpuEvents)?;
@@ -971,6 +1021,67 @@ mod tests {
                 assert!(!t2a_res);
             }
         }
+    }
+
+    #[test]
+    fn test_restore_drops_lbr_msrs() {
+        // MSR index 0x2 does not exist, so no KVM supports it.
+        const UNSUPPORTED_MSR: u32 = 0x2;
+
+        let (vm, mut vcpu) = setup_vcpu(0x10000);
+        configure_vcpu(
+            &vm,
+            &mut vcpu,
+            &CustomCpuTemplate::default(),
+            EntryPoint {
+                entry_addr: GuestAddress(0),
+                protocol: BootProtocol::LinuxBoot,
+            },
+        )
+        .unwrap();
+
+        let state = vcpu.save_state().unwrap();
+        let with_entries_at = |indices: &[u32], at: usize| {
+            let mut state = vcpu.save_state().unwrap();
+            let mut entries = state.saved_msrs[0].as_slice().to_vec();
+            for &index in indices.iter().rev() {
+                entries.insert(
+                    at,
+                    kvm_msr_entry {
+                        index,
+                        data: 0x42,
+                        ..Default::default()
+                    },
+                );
+            }
+            state.saved_msrs[0] = Msrs::from_entries(&entries).unwrap();
+            state
+        };
+
+        // The legacy LBR MSRs are dropped wherever they are in a chunk, and the others restored.
+        let lbr_msrs: Vec<u32> = MSRS_NOT_RESTORED.collect();
+        assert_eq!(lbr_msrs, [0x1db, 0x1dc, 0x1dd, 0x1de]);
+        let len = state.saved_msrs[0].as_slice().len();
+        for at in [0, len / 2, len] {
+            vcpu.restore_state(&with_entries_at(&lbr_msrs, at)).unwrap();
+        }
+        let restored = vcpu.save_state().unwrap();
+        assert_eq!(
+            restored.saved_msrs[0].as_slice().len(),
+            state.saved_msrs[0].as_slice().len()
+        );
+
+        // Any other MSR that cannot be set still fails the restore.
+        assert_eq!(
+            vcpu.restore_state(&with_entries_at(&[UNSUPPORTED_MSR], 0))
+                .unwrap_err(),
+            KvmVcpuError::VcpuSetMsrsIncomplete
+        );
+        assert_eq!(
+            vcpu.restore_state(&with_entries_at(&[0x1db, UNSUPPORTED_MSR], 0))
+                .unwrap_err(),
+            KvmVcpuError::VcpuSetMsrsIncomplete
+        );
     }
 
     #[test]
