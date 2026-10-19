@@ -497,16 +497,20 @@ impl GuestRegionMmapExt {
                 Ok(())
             }
             // Match either the case of an anonymous mapping, or the case
-            // of a shared file mapping.
-            // TODO: madvise(MADV_DONTNEED) doesn't actually work with memfd
-            // (or in general MAP_SHARED of a fd). In those cases we should use
-            // fallocate64(FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE).
-            // We keep falling to the madvise branch to keep the previous behaviour.
-            _ => {
-                // Madvise the region in order to mark it as not used.
+            // of a shared file mapping (e.g. memfd).
+            (file_offset, _) => {
+                // MADV_DONTNEED on a shared file mapping only drops the page table entries, the
+                // file keeps its pages. MADV_REMOVE frees the backing pages and, unlike
+                // fallocate(FALLOC_FL_PUNCH_HOLE) on the file, sends UFFD_EVENT_REMOVE to a
+                // registered userfaultfd, so a page fault handler learns about the discard.
+                let advice = if file_offset.is_some() {
+                    libc::MADV_REMOVE
+                } else {
+                    libc::MADV_DONTNEED
+                };
                 let host_addr = self.get_host_address(caddr)?;
                 // SAFETY: The address and length are known to be valid.
-                let ret = unsafe { libc::madvise(host_addr.cast(), len, libc::MADV_DONTNEED) };
+                let ret = unsafe { libc::madvise(host_addr.cast(), len, advice) };
                 if ret < 0 {
                     let os_error = std::io::Error::last_os_error();
                     error!("discard_range: madvise failed: {:?}", os_error);
@@ -1540,6 +1544,53 @@ mod tests {
                 .unwrap_err(),
             GuestMemoryError::InvalidGuestAddress(_)
         );
+    }
+
+    #[test]
+    fn test_discard_range_on_memfd() {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+
+        let page_size = host_page_size();
+        // Keep guest addresses distinct from file offsets to exercise offset translation.
+        let second_region = GuestAddress((4 * page_size) as u64);
+        let discard_addr = second_region.unchecked_add(page_size as u64);
+        let (regions, memfd) = memfd_backed(
+            &[(GuestAddress(0), page_size), (second_region, 2 * page_size)],
+            false,
+            HugePageConfig::None,
+        )
+        .unwrap();
+        let mem = into_region_ext(regions);
+        mem.write(&vec![1u8; page_size], GuestAddress(0)).unwrap();
+        mem.write(&vec![2u8; 2 * page_size], second_region).unwrap();
+        let allocated_before = memfd.metadata().unwrap().blocks() * 512;
+        assert_eq!(allocated_before, (3 * page_size) as u64);
+
+        mem.discard_range(discard_addr, page_size).unwrap();
+
+        // The backing page is freed in the memfd, not only unmapped from this process.
+        assert_eq!(
+            memfd.metadata().unwrap().blocks() * 512,
+            allocated_before - page_size as u64
+        );
+        let mut page = vec![0u8; page_size];
+        memfd
+            .read_exact_at(&mut page, (2 * page_size) as u64)
+            .unwrap();
+        assert_eq!(page, vec![0u8; page_size]);
+        mem.read(&mut page, discard_addr).unwrap();
+        assert_eq!(page, vec![0u8; page_size]);
+        mem.read(&mut page, second_region).unwrap();
+        assert_eq!(page, vec![2u8; page_size]);
+        mem.read(&mut page, GuestAddress(0)).unwrap();
+        assert_eq!(page, vec![1u8; page_size]);
+
+        // Writes after the discard still reach the shared backing.
+        mem.write(&vec![3u8; page_size], discard_addr).unwrap();
+        memfd
+            .read_exact_at(&mut page, (2 * page_size) as u64)
+            .unwrap();
+        assert_eq!(page, vec![3u8; page_size]);
     }
 
     /// Verifies that `slots_intersecting_range` returns the correct slots for
