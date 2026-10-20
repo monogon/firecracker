@@ -731,6 +731,42 @@
                         "comment": "Ensure PROT_EXEC is not set"
                     }
                 ]
+            },
+            {
+                "syscall": "setsockopt",
+                "comment": "NBD Unix socket receive/send timeouts during restore",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 20
+                    }
+                ]
+            },
+            {
+                "syscall": "setsockopt",
+                "comment": "NBD Unix socket receive/send timeouts during restore",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 21
+                    }
+                ]
             }
         ]
     },

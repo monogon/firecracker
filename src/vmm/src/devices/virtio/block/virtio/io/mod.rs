@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod async_io;
+pub mod nbd;
 pub mod sync_io;
 
 use std::fmt::Debug;
@@ -27,6 +28,8 @@ pub enum FileEngineOk {
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum BlockIoError {
+    /// NBD error: {0}
+    Nbd(std::io::Error),
     /// Sync error: {0}
     Sync(SyncIoError),
     /// Async error: {0}
@@ -62,6 +65,7 @@ pub enum FileEngine {
     #[allow(unused)]
     Async(AsyncFileEngine),
     Sync(SyncFileEngine),
+    Nbd(nbd::NbdEngine),
 }
 
 impl FileEngine {
@@ -78,6 +82,11 @@ impl FileEngine {
         match self {
             FileEngine::Async(engine) => engine.update_file(file).map_err(BlockIoError::Async)?,
             FileEngine::Sync(engine) => engine.update_file(file),
+            FileEngine::Nbd(_) => {
+                return Err(BlockIoError::Nbd(std::io::Error::other(
+                    "cannot replace an NBD socket with a file",
+                )));
+            }
         };
 
         Ok(())
@@ -88,6 +97,7 @@ impl FileEngine {
         match self {
             FileEngine::Async(engine) => engine.file(),
             FileEngine::Sync(engine) => engine.file(),
+            FileEngine::Nbd(_) => panic!("NBD has no backing file"),
         }
     }
 
@@ -105,6 +115,13 @@ impl FileEngine {
                 Err(err) => Err(RequestError {
                     req: err.req,
                     error: BlockIoError::Async(err.error),
+                }),
+            },
+            FileEngine::Nbd(engine) => match engine.transfer(false, offset, mem, addr, count) {
+                Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
+                Err(err) => Err(RequestError {
+                    req,
+                    error: BlockIoError::Nbd(err),
                 }),
             },
             FileEngine::Sync(engine) => match engine.read(offset, mem, addr, count) {
@@ -133,6 +150,13 @@ impl FileEngine {
                     error: BlockIoError::Async(err.error),
                 }),
             },
+            FileEngine::Nbd(engine) => match engine.transfer(true, offset, mem, addr, count) {
+                Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
+                Err(err) => Err(RequestError {
+                    req,
+                    error: BlockIoError::Nbd(err),
+                }),
+            },
             FileEngine::Sync(engine) => match engine.write(offset, mem, addr, count) {
                 Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
                 Err(err) => Err(RequestError {
@@ -153,6 +177,13 @@ impl FileEngine {
                 Err(err) => Err(RequestError {
                     req: err.req,
                     error: BlockIoError::Async(err.error),
+                }),
+            },
+            FileEngine::Nbd(engine) => match engine.flush().map(|_| 0) {
+                Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
+                Err(err) => Err(RequestError {
+                    req,
+                    error: BlockIoError::Nbd(err),
                 }),
             },
             FileEngine::Sync(engine) => match engine.flush() {
@@ -177,6 +208,13 @@ impl FileEngine {
                 Err(err) => Err(RequestError {
                     req: err.req,
                     error: BlockIoError::Async(err.error),
+                }),
+            },
+            FileEngine::Nbd(engine) => match engine.zero(offset, len, true, true).map(|_| 0) {
+                Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
+                Err(err) => Err(RequestError {
+                    req,
+                    error: BlockIoError::Nbd(err),
                 }),
             },
             FileEngine::Sync(engine) => match engine.discard(offset, len) {
@@ -204,6 +242,13 @@ impl FileEngine {
                     error: BlockIoError::Async(err.error),
                 }),
             },
+            FileEngine::Nbd(engine) => match engine.zero(offset, len, false, unmap).map(|_| 0) {
+                Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
+                Err(err) => Err(RequestError {
+                    req,
+                    error: BlockIoError::Nbd(err),
+                }),
+            },
             FileEngine::Sync(engine) => match engine.write_zeroes(offset, len, unmap) {
                 Ok(()) => Ok(FileEngineOk::Executed(RequestOk { req, count: 0 })),
                 Err(err) => Err(RequestError {
@@ -217,7 +262,7 @@ impl FileEngine {
     pub fn drain(&mut self, discard: bool) -> Result<(), BlockIoError> {
         match self {
             FileEngine::Async(engine) => engine.drain(discard).map_err(BlockIoError::Async),
-            FileEngine::Sync(_engine) => Ok(()),
+            FileEngine::Sync(_) | FileEngine::Nbd(_) => Ok(()),
         }
     }
 
@@ -227,6 +272,7 @@ impl FileEngine {
                 engine.drain_and_flush(discard).map_err(BlockIoError::Async)
             }
             FileEngine::Sync(engine) => engine.flush().map_err(BlockIoError::Sync),
+            FileEngine::Nbd(engine) => engine.flush().map_err(BlockIoError::Nbd),
         }
     }
 }

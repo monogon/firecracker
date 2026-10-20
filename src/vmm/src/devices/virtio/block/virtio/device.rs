@@ -11,6 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
 use std::ops::Deref;
 use std::os::linux::fs::MetadataExt;
+use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -27,8 +28,8 @@ use crate::devices::virtio::block::CacheType;
 use crate::devices::virtio::block::virtio::metrics::{BlockDeviceMetrics, BlockMetricsPerDevice};
 use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDevice, VirtioDeviceType};
 use crate::devices::virtio::generated::virtio_blk::{
-    VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO, VIRTIO_BLK_F_WRITE_ZEROES,
-    VIRTIO_BLK_ID_BYTES,
+    VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO,
+    VIRTIO_BLK_F_WRITE_ZEROES, VIRTIO_BLK_ID_BYTES,
 };
 use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
 use crate::devices::virtio::generated::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
@@ -101,6 +102,18 @@ impl DiskProperties {
         is_disk_read_only: bool,
         file_engine_type: FileEngineType,
     ) -> Result<Self, VirtioBlockError> {
+        if std::fs::metadata(&disk_image_path).is_ok_and(|m| m.file_type().is_socket()) {
+            let engine = block_io::nbd::NbdEngine::connect(&disk_image_path, is_disk_read_only)
+                .map_err(|e| VirtioBlockError::FileEngine(block_io::BlockIoError::Nbd(e)))?;
+            return Ok(Self {
+                file_path: disk_image_path,
+                nsectors: engine.size >> SECTOR_SHIFT,
+                image_id: [0; VIRTIO_BLK_ID_BYTES as usize],
+                file_engine: FileEngine::Nbd(engine),
+                discard_unsupported: false,
+                write_zeroes_unsupported: false,
+            });
+        }
         let mut disk_image = Self::open_file(&disk_image_path, is_disk_read_only)?;
         let disk_size = Self::file_size(&disk_image_path, &mut disk_image)?;
         let image_id = Self::build_disk_image_id(&disk_image);
@@ -122,6 +135,13 @@ impl DiskProperties {
         disk_image_path: String,
         is_disk_read_only: bool,
     ) -> Result<(), VirtioBlockError> {
+        if matches!(self.file_engine, FileEngine::Nbd(_))
+            || std::fs::metadata(&disk_image_path).is_ok_and(|m| m.file_type().is_socket())
+        {
+            return Err(VirtioBlockError::FileEngine(block_io::BlockIoError::Nbd(
+                std::io::Error::other("NBD drive replacement requires paused snapshot restore"),
+            )));
+        }
         let mut disk_image = Self::open_file(&disk_image_path, is_disk_read_only)?;
         let disk_size = Self::file_size(&disk_image_path, &mut disk_image)?;
 
@@ -329,7 +349,7 @@ macro_rules! unwrap_async_file_engine_or_return {
     ($file_engine: expr) => {
         match $file_engine {
             FileEngine::Async(engine) => engine,
-            FileEngine::Sync(_) => {
+            FileEngine::Sync(_) | FileEngine::Nbd(_) => {
                 error!("The block device doesn't use an async IO engine");
                 return;
             }
@@ -368,6 +388,12 @@ impl VirtioBlock {
             avail_features |= 1u64 << VIRTIO_BLK_F_WRITE_ZEROES;
         }
 
+        // NBD exports need block-aligned I/O; the guest uses their block size.
+        let nbd = matches!(disk_properties.file_engine, FileEngine::Nbd(_));
+        if nbd {
+            avail_features |= 1u64 << VIRTIO_BLK_F_BLK_SIZE;
+        }
+
         let queue_evts = [EventFd::new(libc::EFD_NONBLOCK).map_err(VirtioBlockError::EventFd)?];
 
         let queues = BLOCK_QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
@@ -396,7 +422,14 @@ impl VirtioBlock {
             // alignment preference — because the host's fallocate(PUNCH_HOLE)
             // accepts any byte offset/length and the kernel rounds internally
             // to FS-block granularity.
-            discard_sector_alignment: if !config.is_read_only { 1 } else { 0 },
+            discard_sector_alignment: if config.is_read_only {
+                0
+            } else if nbd {
+                block_io::nbd::BLOCK_SIZE >> SECTOR_SHIFT
+            } else {
+                1
+            },
+            blk_size: if nbd { block_io::nbd::BLOCK_SIZE } else { 0 },
             max_write_zeroes_sectors: if !config.is_read_only {
                 discard_sectors
             } else {
@@ -715,7 +748,7 @@ impl VirtioBlock {
     /// Retrieve the file engine type.
     pub fn file_engine_type(&self) -> FileEngineType {
         match self.disk.file_engine {
-            FileEngine::Sync(_) => FileEngineType::Sync,
+            FileEngine::Sync(_) | FileEngine::Nbd(_) => FileEngineType::Sync,
             FileEngine::Async(_) => FileEngineType::Async,
         }
     }

@@ -13,7 +13,7 @@ use crate::devices::virtio::block::persist::BlockConstructorArgs;
 use crate::devices::virtio::block::virtio::device::FileEngineType;
 use crate::devices::virtio::block::virtio::metrics::BlockMetricsPerDevice;
 use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDeviceType};
-use crate::devices::virtio::generated::virtio_blk::VIRTIO_BLK_F_RO;
+use crate::devices::virtio::generated::virtio_blk::{VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_RO};
 use crate::devices::virtio::persist::VirtioDeviceState;
 use crate::rate_limiter::RateLimiter;
 use crate::rate_limiter::persist::RateLimiterState;
@@ -109,6 +109,8 @@ impl Persist<'_> for VirtioBlock {
 
         let avail_features = state.virtio_state.avail_features;
         let acked_features = state.virtio_state.acked_features;
+        // Set for NBD drives, whose exports need block-aligned I/O.
+        let nbd = avail_features & (1u64 << VIRTIO_BLK_F_BLK_SIZE) != 0;
 
         let discard_sectors = u32::try_from(disk_properties.nsectors).unwrap_or(u32::MAX);
         let config_space = ConfigSpace {
@@ -120,7 +122,14 @@ impl Persist<'_> for VirtioBlock {
             // alignment preference — because the host's fallocate(PUNCH_HOLE)
             // accepts any byte offset/length and the kernel rounds internally
             // to FS-block granularity.
-            discard_sector_alignment: if !is_read_only { 1 } else { 0 },
+            discard_sector_alignment: if is_read_only {
+                0
+            } else if nbd {
+                io::nbd::BLOCK_SIZE >> SECTOR_SHIFT
+            } else {
+                1
+            },
+            blk_size: if nbd { io::nbd::BLOCK_SIZE } else { 0 },
             max_write_zeroes_sectors: if !is_read_only { discard_sectors } else { 0 },
             max_write_zeroes_seg: if !is_read_only { 1 } else { 0 },
             write_zeroes_may_unmap: if !is_read_only { 1 } else { 0 },
